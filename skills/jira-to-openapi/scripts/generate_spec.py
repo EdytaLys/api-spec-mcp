@@ -1010,17 +1010,66 @@ def build_comment_body(
     return {"version": 1, "type": "doc", "content": content}
 
 
-def post_comment_to_jira(
-    issue_key: str,
-    comment_body: dict,
+def create_subtask_in_jira(
+    parent_key: str,
+    diffs: list[dict],
+    description_body: dict,
+    project_key: str = "SCRUM",
 ) -> str | None:
-    """POST an ADF comment to the JIRA issue. Returns the comment URL on success."""
-    url = f"{CONFIG['base_url']}/rest/api/3/issue/{issue_key}/comment"
-    r = _jira_session().post(url, json={"body": comment_body})
+    """
+    Create a Subtask under parent_key containing the OpenAPI change report.
+    Returns the new subtask URL on success, or None on failure.
+    """
+    all_breaking = [m for d in diffs for m in d["breaking"]]
+    endpoints    = ", ".join(f"{d['method']} {d['path']}" for d in diffs)
+
+    if all_breaking:
+        prefix  = "⚠️ Breaking changes"
+        summary = f"OpenAPI spec review: {endpoints} — breaking changes detected"
+    elif any(d["additive"] for d in diffs):
+        prefix  = "✅ Additive changes"
+        summary = f"OpenAPI spec review: {endpoints} — additive changes, update spec"
+    else:
+        prefix  = "✔ No changes"
+        summary = f"OpenAPI spec review: {endpoints} — no schema changes"
+
+    body = {
+        "fields": {
+            "project":     {"key": project_key},
+            "parent":      {"key": parent_key},
+            "issuetype":   {"name": "Subtask"},
+            "summary":     summary,
+            "description": description_body,
+            "labels":      ["api-spec-generated"],
+        }
+    }
+
+    r = _jira_session().post(f"{CONFIG['base_url']}/rest/api/3/issue", json=body)
     if r.status_code in (200, 201):
-        comment_id = r.json().get("id", "?")
-        return f"{CONFIG['base_url']}/browse/{issue_key}?focusedCommentId={comment_id}"
-    print(f"  ⚠  Failed to post comment: {r.status_code} {r.text[:300]}", file=sys.stderr)
+        data = r.json()
+        subtask_key = data.get("key", "?")
+        return f"{CONFIG['base_url']}/browse/{subtask_key}"
+
+    # Subtask issue type may not exist on the project — try "Task" as fallback
+    if r.status_code == 400 and "issuetype" in r.text.lower():
+        body["fields"]["issuetype"] = {"name": "Task"}
+        body["fields"].pop("parent", None)   # tasks don't always require parent
+        r2 = _jira_session().post(f"{CONFIG['base_url']}/rest/api/3/issue", json=body)
+        if r2.status_code in (200, 201):
+            data = r2.json()
+            task_key = data.get("key", "?")
+            # Link back to parent via issue link
+            _jira_session().post(
+                f"{CONFIG['base_url']}/rest/api/3/issueLink",
+                json={
+                    "type":         {"name": "is subtask of"},
+                    "inwardIssue":  {"key": task_key},
+                    "outwardIssue": {"key": parent_key},
+                },
+            )
+            return f"{CONFIG['base_url']}/browse/{task_key}"
+
+    print(f"  ⚠  Failed to create subtask: {r.status_code} {r.text[:400]}", file=sys.stderr)
     return None
 
 
@@ -1046,8 +1095,10 @@ def main() -> None:
     )
     parser.add_argument("--report-only", action="store_true",
         help="Print the change report only; do not write the spec file.")
-    parser.add_argument("--post-comment", action="store_true",
-        help="Post the change report and generated operation as a comment on the JIRA issue.")
+    parser.add_argument("--create-subtask", action="store_true",
+        help="Create a Subtask under the JIRA issue containing the change report and generated spec.")
+    parser.add_argument("--project", default="SCRUM",
+        help="JIRA project key used when creating the subtask (default: SCRUM).")
     args = parser.parse_args()
 
     key = args.issue_key.upper()
@@ -1212,22 +1263,25 @@ def main() -> None:
         print(f"  Validate at   : https://editor.swagger.io/\n", file=sys.stderr)
         print(content)
 
-    # ── Post comment to JIRA ──────────────────────────────────────────────────
-    if args.post_comment:
+    # ── Create subtask in JIRA ────────────────────────────────────────────────
+    if args.create_subtask:
         if not diffs:
-            print("  ℹ  No diff available — skipping comment (run with --existing-spec to enable).",
+            print("  ℹ  No diff available — skipping subtask (run with --existing-spec to enable).",
                   file=sys.stderr)
         else:
-            print(f"\n  Posting comment to {key} …", file=sys.stderr)
-            comment_body = build_comment_body(
+            print(f"\n  Creating subtask under {key} …", file=sys.stderr)
+            description_body = build_comment_body(
                 key, summary, diffs, merged_spec,
                 content, detected_endpoints, fields_raw,
             )
-            comment_url = post_comment_to_jira(key, comment_body)
-            if comment_url:
-                print(f"  ✓ Comment posted: {comment_url}", file=sys.stderr)
+            subtask_url = create_subtask_in_jira(
+                key, diffs, description_body,
+                project_key=args.project,
+            )
+            if subtask_url:
+                print(f"  ✓ Subtask created: {subtask_url}", file=sys.stderr)
             else:
-                print("  ⚠  Comment posting failed.", file=sys.stderr)
+                print("  ⚠  Subtask creation failed.", file=sys.stderr)
 
 
 if __name__ == "__main__":
