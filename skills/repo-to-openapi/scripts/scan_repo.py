@@ -2,22 +2,31 @@
 """
 scan_repo.py
 ============
-Fetches a GitHub repository and generates an OpenAPI 3.0 spec from all REST endpoints.
+Scans a GitHub repository (remote) or a local directory and generates an OpenAPI 3.0
+spec from all REST endpoints found in source code.
 Produces output compatible with the jira-to-openapi skill (same schema style, security
 scheme, and x-* extension conventions) for seamless JIRA integration.
 
-Usage:
+Usage — remote GitHub repo:
     python scan_repo.py https://github.com/owner/repo
     python scan_repo.py https://github.com/owner/repo --branch develop
     python scan_repo.py https://github.com/owner/repo --base-url https://api.example.com/v1
-    python scan_repo.py https://github.com/owner/repo --output my-spec.yaml
-    python scan_repo.py https://github.com/owner/repo --format json
+
+Usage — local directory:
+    python scan_repo.py /path/to/local/repo
+    python scan_repo.py /path/to/local/repo --branch feature/my-branch   # for display only
+    python scan_repo.py . --base-url http://localhost:8080
+
+Common options:
+    --output my-spec.yaml
+    --format json
+    --upload-to https://github.com/owner/specs-repo
 
 Requirements: pip install requests pyyaml
 """
 
 import os, sys, re, json, base64, argparse, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 try:
     import requests
@@ -90,6 +99,47 @@ def repo_description(owner: str, repo: str) -> str:
     r = SESSION.get(f"{GITHUB_API}/repos/{owner}/{repo}")
     r.raise_for_status()
     return r.json().get("description") or ""
+
+# ─── LOCAL REPO HELPERS ───────────────────────────────────────────────────────
+
+def local_tree(root: Path) -> list[str]:
+    """Return relative POSIX paths of all files under root, skipping common noise dirs."""
+    _skip = {".git", "node_modules", "__pycache__", ".gradle", "target", "build",
+             "dist", "out", ".idea", ".vscode", ".mvn"}
+    paths: list[str] = []
+    for p in root.rglob("*"):
+        if p.is_file() and not any(part in _skip for part in p.parts):
+            paths.append(p.relative_to(root).as_posix())
+    return paths
+
+def local_fetcher(root: Path):
+    """Return a fetcher function that reads files from a local directory."""
+    def _fetch(rel_path: str) -> str:
+        full = root / rel_path
+        try:
+            return full.read_text(encoding="utf-8", errors="replace")
+        except (OSError, IsADirectoryError):
+            return ""
+    return _fetch
+
+def local_readme_base_url(root: Path) -> str:
+    """Try to extract a production URL from README in a local repo."""
+    for name in ("README.md", "readme.md", "README.rst"):
+        p = root / name
+        if p.exists():
+            m = re.search(r'https?://[^\s)\"\']+run\.app', p.read_text(errors="replace"))
+            if m:
+                return m.group(0).rstrip("/")
+    return ""
+
+def local_git_branch(root: Path) -> str:
+    """Return current git branch of a local repo, or empty string."""
+    head = root / ".git" / "HEAD"
+    if head.exists():
+        content = head.read_text().strip()
+        if content.startswith("ref: refs/heads/"):
+            return content[len("ref: refs/heads/"):]
+    return ""
 
 # ─── FRAMEWORK DETECTION ──────────────────────────────────────────────────────
 
@@ -710,16 +760,30 @@ def upload_spec(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate an OpenAPI spec by scanning a GitHub repository."
+        description=(
+            "Generate an OpenAPI 3.0 spec by scanning a GitHub repository or a local directory. "
+            "Pass either a GitHub URL (https://github.com/owner/repo) or a local path (/path/to/repo or .)."
+        )
     )
-    parser.add_argument("repo_url", help="GitHub repository URL, e.g. https://github.com/owner/repo")
-    parser.add_argument("--branch", "-b", default="", help="Branch to scan (default: repo default branch)")
-    parser.add_argument("--base-url", default="", help="Override the production server base URL")
-    parser.add_argument("--output", "-o", help="Local output file path (default: <repo>-openapi.yaml)")
+    parser.add_argument(
+        "source",
+        help=(
+            "GitHub repo URL (https://github.com/owner/repo) "
+            "OR local directory path (/path/to/repo or .)"
+        ),
+    )
+    parser.add_argument("--branch", "-b", default="",
+                        help="Remote: branch to scan (default: repo default branch). "
+                             "Local: displayed in spec metadata only.")
+    parser.add_argument("--base-url", default="",
+                        help="Override the production server base URL in the spec")
+    parser.add_argument("--output", "-o",
+                        help="Local output file path (default: <repo-name>-openapi.yaml)")
     parser.add_argument("--format", "-f", choices=["yaml", "json"], default="yaml")
     # Upload options
     parser.add_argument("--upload-to",      metavar="REPO_URL",
-                        help="GitHub repo URL to upload the spec to, e.g. https://github.com/owner/specs-repo")
+                        help="GitHub repo URL to upload the generated spec into "
+                             "(e.g. https://github.com/owner/specs-repo)")
     parser.add_argument("--upload-path",    metavar="PATH",
                         help="Path inside the target repo (default: specs/<filename>)")
     parser.add_argument("--upload-branch",  metavar="BRANCH", default="main",
@@ -728,18 +792,57 @@ def main():
                         help="Commit message for the upload (default: auto-generated)")
     args = parser.parse_args()
 
-    owner, repo_name = parse_github_url(args.repo_url)
-    branch = args.branch or default_branch(owner, repo_name)
-    description = repo_description(owner, repo_name)
+    source = args.source
 
-    print(f"Scanning {owner}/{repo_name}@{branch} …", file=sys.stderr)
+    # ── Determine if source is a local path or a remote GitHub URL ──────────
+    is_local = not source.startswith("http") and not source.startswith("git@")
+    if is_local:
+        local_root = Path(source).expanduser().resolve()
+        if not local_root.is_dir():
+            sys.exit(f"⛔  Local path does not exist or is not a directory: {local_root}")
 
-    tree = fetch_tree(owner, repo_name, branch)
-    file_paths = [f["path"] for f in tree]
+        repo_name   = local_root.name
+        source_label = str(local_root)
+        branch      = args.branch or local_git_branch(local_root) or "local"
+        description = ""
+        # Try to read description from README first line after title
+        readme_path = local_root / "README.md"
+        if readme_path.exists():
+            lines = readme_path.read_text(errors="replace").splitlines()
+            for line in lines:
+                if line.strip() and not line.startswith("#"):
+                    description = line.strip()
+                    break
 
-    def fetcher(path: str) -> str:
-        return fetch_file(owner, repo_name, path, branch)
+        print(f"Scanning local path: {local_root} …", file=sys.stderr)
+        print(f"  Branch            : {branch}", file=sys.stderr)
 
+        file_paths = local_tree(local_root)
+        fetcher    = local_fetcher(local_root)
+
+        base_url = args.base_url or local_readme_base_url(local_root) or "http://localhost:8080"
+
+    else:
+        owner, repo_name = parse_github_url(source)
+        branch      = args.branch or default_branch(owner, repo_name)
+        description = repo_description(owner, repo_name)
+        source_label = source
+
+        print(f"Scanning {owner}/{repo_name}@{branch} …", file=sys.stderr)
+
+        tree = fetch_tree(owner, repo_name, branch)
+        file_paths = [f["path"] for f in tree]
+
+        def fetcher(path: str) -> str:
+            return fetch_file(owner, repo_name, path, branch)
+
+        base_url = args.base_url
+        if not base_url:
+            readme = fetcher("README.md") or fetcher("readme.md")
+            m = re.search(r'https?://[^\s)\"\']+run\.app', readme)
+            base_url = m.group(0).rstrip("/") if m else "https://api.example.com/v1"
+
+    # ── Framework detection and parsing ─────────────────────────────────────
     framework = detect_framework(file_paths, fetcher)
     print(f"  Framework detected: {framework}", file=sys.stderr)
 
@@ -769,17 +872,10 @@ def main():
     for ep in endpoints:
         print(f"    {ep['verb']:6s} {ep['path']}", file=sys.stderr)
 
-    # Determine production base URL
-    base_url = args.base_url
-    if not base_url:
-        # Try to read from README or application.properties
-        readme = fetcher("README.md") or fetcher("readme.md")
-        m = re.search(r'https?://[^\s)\"\']+run\.app', readme)
-        base_url = m.group(0).rstrip("/") if m else "https://api.example.com/v1"
+    # ── Build and serialise spec ─────────────────────────────────────────────
+    spec = build_spec(source_label, repo_name, repo_name, description, endpoints, schemas, base_url)
 
-    spec = build_spec(args.repo_url, owner, repo_name, description, endpoints, schemas, base_url)
-
-    ext      = "json" if args.format == "json" else "yaml"
+    ext          = "json" if args.format == "json" else "yaml"
     out_path_str = args.output or f"{repo_name}-openapi.{ext}"
 
     if args.format == "json" or yaml is None:
@@ -793,14 +889,14 @@ def main():
     print(f"\n✓ Spec saved: {out_path_str}", file=sys.stderr)
     print(f"  Validate : https://editor.swagger.io/\n", file=sys.stderr)
 
-    # Upload to a target repo if requested
+    # ── Optional upload ──────────────────────────────────────────────────────
     if args.upload_to:
         upload_spec(
             content=content,
             target_repo_url=args.upload_to,
             file_path_in_repo=args.upload_path or f"specs/{out_path_str.split('/')[-1]}",
             commit_message=args.upload_message
-                or f"chore: add OpenAPI spec scanned from {args.repo_url}",
+                or f"chore: add OpenAPI spec scanned from {source_label}",
             branch=args.upload_branch or "main",
         )
 
