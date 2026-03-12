@@ -918,11 +918,11 @@ def build_comment_body(
     summary: str,
     diffs: list[dict],
     merged_spec: dict,
-    spec_yaml: str,
+    endpoint_only_yaml: str,
     detected_endpoints: list[tuple[str, str]],
     fields_raw: dict[str, str],
 ) -> dict:
-    """Build an ADF comment body with the change report and key spec sections."""
+    """Build an ADF comment body with the change report and the full endpoint-only spec."""
     all_breaking = [m for d in diffs for m in d["breaking"]]
     all_additive = [m for d in diffs for m in d["additive"]]
     new_version   = merged_spec.get("info", {}).get("version", "?")
@@ -942,8 +942,8 @@ def build_comment_body(
 
         if status == "new":
             verdict_items = [
-                f"✅ NEW endpoint — additive change, no breaking impact",
-                f"No existing callers will be affected",
+                "✅ NEW endpoint — additive change, no breaking impact",
+                "No existing callers will be affected",
             ]
         elif status == "unchanged":
             verdict_items = ["✔  No changes detected for this endpoint."]
@@ -960,12 +960,10 @@ def build_comment_body(
 
         content.append(_adf_bullet(verdict_items))
 
-        # Embed the generated operation YAML for new/modified endpoints
-        if status in ("new", "modified"):
-            op_yaml = _extract_operation_yaml(spec_yaml, method)
-            if op_yaml:
-                content.append(_adf_heading("Generated operation", level=4))
-                content.append(_adf_code(op_yaml, "yaml"))
+    # ── Full endpoint-only spec (Swagger-pasteable) ────────────────────────────
+    if endpoint_only_yaml:
+        content.append(_adf_heading("Generated OpenAPI spec (paste into editor.swagger.io)", level=3))
+        content.append(_adf_code(endpoint_only_yaml, "yaml"))
 
     # ── Overall verdict ────────────────────────────────────────────────────────
     content.append(_adf_heading("Overall verdict", level=3))
@@ -1238,15 +1236,13 @@ def main() -> None:
     ext      = "json" if args.format == "json" else "yaml"
     out_path = Path(args.output) if args.output else Path(f"{key}-openapi.{ext}")
 
-    if args.format == "json" or yaml is None:
-        content = json.dumps(merged_spec, indent=2)
-    else:
-        content = yaml.dump(
-            merged_spec,
-            default_flow_style=False,
-            sort_keys=False,
-            allow_unicode=True,
-        )
+    def _render(spec: dict) -> str:
+        if args.format == "json" or yaml is None:
+            return json.dumps(spec, indent=2)
+        return yaml.dump(spec, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    content          = _render(merged_spec)
+    endpoint_content = _render(new_spec)
 
     # ── Change report ─────────────────────────────────────────────────────────
     if diffs:
@@ -1257,11 +1253,21 @@ def main() -> None:
         print(f"  Change report : {report_path}", file=sys.stderr)
 
     if not args.report_only:
+        # Always write the endpoint-only spec (pasteable directly into Swagger Editor)
+        ep_only_path = out_path.with_name(f"{key}-endpoint-only.{ext}")
+        ep_only_path.write_text(endpoint_content, encoding="utf-8")
+        print(f"\n✓ Endpoint-only spec: {ep_only_path}  ← paste this into https://editor.swagger.io/", file=sys.stderr)
+
+        # Write the full merged spec (all endpoints from existing spec + new one)
         out_path.write_text(content, encoding="utf-8")
-        print(f"\n✓ Spec saved    : {out_path}", file=sys.stderr)
-        print(f"  Version       : {merged_spec.get('info', {}).get('version', '?')}", file=sys.stderr)
-        print(f"  Validate at   : https://editor.swagger.io/\n", file=sys.stderr)
-        print(content)
+        print(f"✓ Full merged spec  : {out_path}", file=sys.stderr)
+        print(f"  Version           : {merged_spec.get('info', {}).get('version', '?')}", file=sys.stderr)
+
+        # Print the endpoint-only YAML to stdout so it's easy to copy
+        print("\n" + "─" * 72, file=sys.stderr)
+        print("  ENDPOINT-ONLY SPEC (copy-paste into https://editor.swagger.io/)", file=sys.stderr)
+        print("─" * 72 + "\n", file=sys.stderr)
+        print(endpoint_content)
 
     # ── Create subtask in JIRA ────────────────────────────────────────────────
     if args.create_subtask:
@@ -1272,7 +1278,7 @@ def main() -> None:
             print(f"\n  Creating subtask under {key} …", file=sys.stderr)
             description_body = build_comment_body(
                 key, summary, diffs, merged_spec,
-                content, detected_endpoints, fields_raw,
+                endpoint_content, detected_endpoints, fields_raw,
             )
             subtask_url = create_subtask_in_jira(
                 key, diffs, description_body,

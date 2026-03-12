@@ -24,6 +24,8 @@ If an existing spec URL is provided (GitHub or local), the script also:
 - Flags **breaking vs. additive** changes
 - Outputs a plain-English change report
 - Produces a **merged** spec with the new endpoint integrated and the version bumped automatically
+- Produces a **standalone endpoint-only spec** ready to paste into Swagger Editor
+- Optionally **creates a JIRA subtask** containing the change report and the Swagger-ready YAML
 
 ## Prerequisites
 
@@ -43,7 +45,7 @@ or resolved live from the JIRA API if that file is absent.
 
 ```bash
 # Activate the project venv first (only needed once per session)
-python3 -m venv .venv && source .venv/bin/activate
+source /tmp/jira_venv/bin/activate   # or: python3 -m venv .venv && source .venv/bin/activate
 pip install requests pyyaml
 
 # Basic: generate spec from a JIRA story
@@ -65,6 +67,14 @@ python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
 # Print change report only, without writing the spec file
 python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
     --existing-spec <url> --report-only
+
+# Create a JIRA subtask with the change report and the Swagger-ready spec
+python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
+    --existing-spec <url> --create-subtask
+
+# Create subtask under a different project
+python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
+    --existing-spec <url> --create-subtask --project PROJ
 ```
 
 ## Arguments
@@ -77,6 +87,21 @@ python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
 | `--path` | Override auto-detected endpoint path |
 | `--existing-spec` | GitHub blob URL, raw URL, or local path to the current spec |
 | `--report-only` | Print change report without writing the spec file |
+| `--create-subtask` | Create a JIRA subtask with the change report and Swagger-ready YAML |
+| `--project` | JIRA project key for the subtask (default: `SCRUM`) |
+
+## Output files
+
+Every run produces **two spec files** plus a change report:
+
+| File | Contents |
+|---|---|
+| `<KEY>-endpoint-only.yaml` | ✅ **Swagger-pasteable** — single endpoint, complete OpenAPI 3.0.3 doc |
+| `<KEY>-openapi.yaml` | Full merged spec (all endpoints from existing spec + new one) |
+| `<KEY>-openapi.change-report.txt` | Plain-English change report |
+
+The endpoint-only YAML is also printed to **stdout** for easy copy-paste, and is embedded
+verbatim in the JIRA subtask (if `--create-subtask` is used).
 
 ## Supported story template formats
 
@@ -120,18 +145,24 @@ Both formats are parsed automatically — no configuration required.
    - `API Error Scenarios` → `responses` (parsed as `NNN — reason` lines)
    - `API Existing Contract` → existing spec URL (used if `--existing-spec` not passed)
    - `API Change Type` → `info.x-change-type`
-3. **Auto-detects all endpoints** in the story (e.g. `PATCH /api/tasks/{id}`)
-4. **Fetches the existing spec** if a URL is provided (converts GitHub blob → raw URL)
-5. **Diffs each endpoint** against the existing spec:
+3. **Falls back to description sections** when custom fields are empty (free-text template)
+4. **Auto-detects new endpoints** — only from the "New endpoints to create" section and summary line (never from context or required-changes to avoid false positives)
+5. **Fetches the existing spec** if a URL is provided (converts GitHub blob → raw URL)
+6. **Diffs each endpoint** against the existing spec:
    - New endpoint → additive ✅
    - Removed/type-changed request fields → breaking ⚠️
    - New required fields → breaking ⚠️
    - New optional fields → additive ✅
    - New/removed HTTP response codes → flagged accordingly
-6. **Merges** the new endpoints into the existing spec and bumps the version:
+7. **Merges** the new endpoints into the existing spec and bumps the version:
    - Breaking changes → major bump (`2.0.0`)
    - Additive changes → minor bump (`1.1.0`)
-7. **Writes** the merged YAML and a plain-English `<KEY>.change-report.txt`
+8. **Writes** three files: endpoint-only YAML, full merged YAML, and change report
+9. **Creates a JIRA subtask** (if `--create-subtask`) with:
+   - Per-endpoint verdict (new / modified / unchanged)
+   - Full Swagger-pasteable YAML in a code block
+   - Overall verdict and version bump recommendation
+   - Next steps
 
 ## Example change report output
 
@@ -160,14 +191,15 @@ Both formats are parsed automatically — no configuration required.
 
 ## Output file structure
 
+### Endpoint-only spec (`<KEY>-endpoint-only.yaml`) — paste into Swagger Editor
+
 ```yaml
 openapi: "3.0.3"
 info:
   title: <issue summary>
   description: <API Purpose>
-  version: "1.1.0"           # auto-bumped
+  version: "1.0.0"
   x-jira-issue: SCRUM-42
-  x-change-type: Additive
 servers:
   - url: https://api.example.com/v1
 paths:
@@ -216,3 +248,4 @@ security:
 | `No path found in summary` | Add `--path /your/endpoint` |
 | `ModuleNotFoundError: requests` | `pip install requests pyyaml` |
 | `Could not fetch existing spec` | Check `GITHUB_TOKEN` or use a public URL |
+| `Subtask creation failed` | Free-tier JIRA may not support Subtask type; script falls back to Task + issue link |
