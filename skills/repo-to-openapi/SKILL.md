@@ -2,13 +2,15 @@
 name: repo-to-openapi
 description: >
   Use this skill whenever the user wants to generate an OpenAPI 3.0 specification
-  by scanning a GitHub repository. Trigger on any of these phrases or contexts:
-  "scan repo and generate spec", "generate OpenAPI from GitHub", "repo to openapi",
-  "create API spec from repository", "scan codebase for endpoints", "generate spec
-  from source code", "extract API from repo", "analyse endpoints in repo".
-  Also trigger if the user provides a GitHub URL and asks for a spec, API documentation,
-  or endpoint list. Use this skill even if the user just says "generate the spec"
-  and a GitHub URL is visible in the conversation.
+  by scanning a GitHub repository or a local codebase directory. Trigger on any of
+  these phrases or contexts: "scan repo and generate spec", "generate OpenAPI from
+  GitHub", "repo to openapi", "create API spec from repository", "scan codebase for
+  endpoints", "generate spec from source code", "extract API from repo", "analyse
+  endpoints in repo", "scan local project for endpoints", "generate spec from this
+  folder", "create OpenAPI from local code".
+  Also trigger if the user provides a GitHub URL or a local path and asks for a spec,
+  API documentation, or endpoint list. Use this skill even if the user just says
+  "generate the spec" and a GitHub URL or local repo path is visible in the conversation.
   The output is intentionally compatible with the jira-to-openapi skill — same
   OpenAPI 3.0.3 format, BearerAuth security scheme, and x-* extension conventions —
   so specs from both skills can be used together in JIRA API-First workflows.
@@ -36,36 +38,110 @@ can be compared or merged in JIRA API-First workflows.
 
 ## Prerequisites
 
-```
+Create and activate a Python virtual environment, then install dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install requests pyyaml
 ```
 
 Optional — set `GITHUB_TOKEN` env var to raise the GitHub API rate limit from
 60 to 5000 requests/hour (needed for large repos):
 
-```
+```bash
 export GITHUB_TOKEN=ghp_...
 ```
 
 ## How to run
 
+The first argument is either a **GitHub URL** or a **local directory path** (absolute or relative, including `.` for the current directory).
+
 ```bash
-python skills/repo-to-openapi/scripts/scan_repo.py <GITHUB_URL> [options]
+python skills/repo-to-openapi/scripts/scan_repo.py <SOURCE> [options]
 ```
 
-**Arguments:**
-- `<GITHUB_URL>` — required. E.g. `https://github.com/owner/repo`
-- `--branch <name>` — branch to scan (default: repo's default branch)
-- `--base-url <url>` — override production server URL (auto-detected from README if omitted)
-- `--output <path>` — defaults to `<repo-name>-openapi.yaml` in CWD
+**Source — pick one:**
+| What you pass | Behaviour |
+|---|---|
+| `https://github.com/owner/repo` | Fetches files via GitHub API (no local clone needed) |
+| `/path/to/local/repo` | Reads files directly from the local filesystem |
+| `.` | Scans the current working directory |
+
+**Common arguments:**
+- `--branch <name>` — branch to scan. Remote: defaults to repo's default branch. Local git repo: reads that branch's content via `git show` without changing your checkout; defaults to the current branch.
+- `--base-url <url>` — override production server URL (auto-detected from README if omitted; local repos default to `http://localhost:8080`)
+- `--output <path>` — local output file path (default: `<repo-name>-openapi.yaml` in CWD)
 - `--format json` — output JSON instead of YAML
 
-**Example:**
+**Upload to another repo** (requires `GITHUB_TOKEN` with write access to the target):
+- `--upload-to <REPO_URL>` — GitHub repo URL to push the spec into
+- `--upload-path <PATH>` — path inside the target repo (default: `specs/<filename>`)
+- `--upload-branch <BRANCH>` — base branch for the PR (default: `main`)
+- `--upload-message <MSG>` — commit message for the file (default: auto-generated)
+- `--pr-title <TITLE>` — custom PR title (default: auto-generated)
+- `--pr-body <BODY>` — custom PR description (default: auto-generated)
+- `--no-pr` — push directly to `--upload-branch` instead of opening a PR
+
+By default, the spec is committed to a new branch (`chore/openapi-spec-<name>`) and a PR is opened against `--upload-branch`. Use `--no-pr` to skip the PR and push directly.
+
+**Examples:**
+
+Remote repo, scan only:
 ```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
 export GITHUB_TOKEN=ghp_yourtoken
 python skills/repo-to-openapi/scripts/scan_repo.py \
   https://github.com/EdytaLys/task_manager_with_copilot \
   --base-url https://task-manager-with-copilot-server-535572860478.europe-west1.run.app
+```
+
+Local directory:
+```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
+python skills/repo-to-openapi/scripts/scan_repo.py \
+  /path/to/my-api-project \
+  --base-url https://my-api.example.com/v1
+```
+
+Current directory:
+```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
+python skills/repo-to-openapi/scripts/scan_repo.py .
+```
+
+Scan remote repo, upload spec, and open a PR (default behaviour):
+```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
+export GITHUB_TOKEN=ghp_yourtoken   # needs read on source + write on target
+python skills/repo-to-openapi/scripts/scan_repo.py \
+  https://github.com/EdytaLys/task_manager_with_copilot \
+  --upload-to https://github.com/EdytaLys/api-specs \
+  --upload-path specs/task-manager-openapi.yaml \
+  --upload-branch main
+# → commits to chore/openapi-spec-task-manager-openapi-yaml
+# → opens PR: chore/openapi-spec-... → main
+```
+
+Push directly without a PR:
+```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
+python skills/repo-to-openapi/scripts/scan_repo.py \
+  https://github.com/EdytaLys/task_manager_with_copilot \
+  --upload-to https://github.com/EdytaLys/api-specs \
+  --upload-path specs/task-manager-openapi.yaml \
+  --no-pr
+```
+
+Scan local directory, upload, and open PR with custom title:
+```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
+export GITHUB_TOKEN=ghp_yourtoken
+python skills/repo-to-openapi/scripts/scan_repo.py \
+  /path/to/my-api-project \
+  --upload-to https://github.com/EdytaLys/api-specs \
+  --upload-path specs/my-api-openapi.yaml \
+  --pr-title "feat: add OpenAPI spec for my-api"
 ```
 
 The script prints the full spec to stdout AND saves it to the output file.

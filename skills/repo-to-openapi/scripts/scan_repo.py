@@ -2,22 +2,31 @@
 """
 scan_repo.py
 ============
-Fetches a GitHub repository and generates an OpenAPI 3.0 spec from all REST endpoints.
+Scans a GitHub repository (remote) or a local directory and generates an OpenAPI 3.0
+spec from all REST endpoints found in source code.
 Produces output compatible with the jira-to-openapi skill (same schema style, security
 scheme, and x-* extension conventions) for seamless JIRA integration.
 
-Usage:
+Usage — remote GitHub repo:
     python scan_repo.py https://github.com/owner/repo
     python scan_repo.py https://github.com/owner/repo --branch develop
     python scan_repo.py https://github.com/owner/repo --base-url https://api.example.com/v1
-    python scan_repo.py https://github.com/owner/repo --output my-spec.yaml
-    python scan_repo.py https://github.com/owner/repo --format json
+
+Usage — local directory:
+    python scan_repo.py /path/to/local/repo
+    python scan_repo.py /path/to/local/repo --branch feature/my-branch   # for display only
+    python scan_repo.py . --base-url http://localhost:8080
+
+Common options:
+    --output my-spec.yaml
+    --format json
+    --upload-to https://github.com/owner/specs-repo
 
 Requirements: pip install requests pyyaml
 """
 
 import os, sys, re, json, base64, argparse, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 try:
     import requests
@@ -90,6 +99,73 @@ def repo_description(owner: str, repo: str) -> str:
     r = SESSION.get(f"{GITHUB_API}/repos/{owner}/{repo}")
     r.raise_for_status()
     return r.json().get("description") or ""
+
+# ─── LOCAL REPO HELPERS ───────────────────────────────────────────────────────
+
+import subprocess
+
+def _git(root: Path, *args: str) -> str:
+    """Run a git command in root and return stdout, or '' on error."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+def _is_git_repo(root: Path) -> bool:
+    return bool(_git(root, "rev-parse", "--git-dir").strip())
+
+def local_git_branch(root: Path) -> str:
+    """Return the currently checked-out branch name, or ''."""
+    return _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+
+def local_git_tree(root: Path, branch: str) -> list[str]:
+    """List all file paths in a git branch (no checkout needed)."""
+    out = _git(root, "ls-tree", "-r", "--name-only", branch)
+    return [line for line in out.splitlines() if line]
+
+def local_git_fetcher(root: Path, branch: str):
+    """Return a fetcher that reads file content from a specific git branch."""
+    def _fetch(rel_path: str) -> str:
+        return _git(root, "show", f"{branch}:{rel_path}")
+    return _fetch
+
+def local_tree(root: Path) -> list[str]:
+    """Return relative POSIX paths of all files under root, skipping common noise dirs."""
+    _skip = {".git", "node_modules", "__pycache__", ".gradle", "target", "build",
+             "dist", "out", ".idea", ".vscode", ".mvn"}
+    paths: list[str] = []
+    for p in root.rglob("*"):
+        if p.is_file() and not any(part in _skip for part in p.parts):
+            paths.append(p.relative_to(root).as_posix())
+    return paths
+
+def local_fetcher(root: Path):
+    """Return a fetcher that reads files from the working tree on disk."""
+    def _fetch(rel_path: str) -> str:
+        full = root / rel_path
+        try:
+            return full.read_text(encoding="utf-8", errors="replace")
+        except (OSError, IsADirectoryError):
+            return ""
+    return _fetch
+
+def local_readme_base_url(root: Path, fetcher=None) -> str:
+    """Try to extract a production URL from README."""
+    for name in ("README.md", "readme.md", "README.rst"):
+        text = fetcher(name) if fetcher else ""
+        if not text:
+            p = root / name
+            if p.exists():
+                text = p.read_text(errors="replace")
+        if text:
+            m = re.search(r'https?://[^\s)\"\']+run\.app', text)
+            if m:
+                return m.group(0).rstrip("/")
+    return ""
 
 # ─── FRAMEWORK DETECTION ──────────────────────────────────────────────────────
 
@@ -661,31 +737,252 @@ def build_spec(
         "tags": [{"name": t, "description": f"Operations on {t} resources"} for t in sorted(tags_seen)],
     }
 
+# ─── UPLOAD TO REPO ──────────────────────────────────────────────────────────
+
+def _get_branch_sha(owner: str, repo: str, branch: str) -> str:
+    """Return the HEAD commit SHA of a branch."""
+    r = SESSION.get(f"{GITHUB_API}/repos/{owner}/{repo}/git/ref/heads/{branch}")
+    r.raise_for_status()
+    return r.json()["object"]["sha"]
+
+def _create_branch(owner: str, repo: str, new_branch: str, from_sha: str) -> None:
+    """Create a new branch at the given SHA."""
+    r = SESSION.post(
+        f"{GITHUB_API}/repos/{owner}/{repo}/git/refs",
+        json={"ref": f"refs/heads/{new_branch}", "sha": from_sha},
+    )
+    if r.status_code == 422:
+        # Branch already exists — that's OK, we'll push to it
+        return
+    r.raise_for_status()
+
+def _create_pr(
+    owner: str,
+    repo: str,
+    head_branch: str,
+    base_branch: str,
+    title: str,
+    body: str,
+) -> str:
+    """Open a pull request and return its HTML URL."""
+    r = SESSION.post(
+        f"{GITHUB_API}/repos/{owner}/{repo}/pulls",
+        json={
+            "title": title,
+            "head":  head_branch,
+            "base":  base_branch,
+            "body":  body,
+        },
+    )
+    r.raise_for_status()
+    return r.json().get("html_url", "")
+
+def upload_spec(
+    content: str,
+    target_repo_url: str,
+    file_path_in_repo: str,
+    commit_message: str,
+    base_branch: str,
+    source_label: str,
+    create_pr: bool = True,
+    pr_title: str = "",
+    pr_body: str = "",
+) -> None:
+    """
+    Upload the spec to a new branch in the target repo, then open a PR
+    against base_branch (default: main).  Requires GITHUB_TOKEN with
+    write access to the target repo.
+    """
+    if not GITHUB_TOKEN:
+        print("⚠  GITHUB_TOKEN is not set — cannot upload to target repo.", file=sys.stderr)
+        print("   Set GITHUB_TOKEN with write access to the target repo and retry.", file=sys.stderr)
+        return
+
+    t_owner, t_repo = parse_github_url(target_repo_url)
+
+    file_url = f"{GITHUB_API}/repos/{t_owner}/{t_repo}/contents/{file_path_in_repo}"
+
+    if create_pr:
+        # Derive a short, URL-safe branch name for the PR
+        spec_slug = re.sub(r"[^a-z0-9-]", "-", file_path_in_repo.lower().split("/")[-1].replace("_", "-"))
+        spec_slug = re.sub(r"-+", "-", spec_slug).strip("-")
+        target_branch = f"chore/openapi-spec-{spec_slug}"
+
+        # Get base branch HEAD SHA and create the PR branch from it
+        print(f"  Creating branch {target_branch!r} in {t_owner}/{t_repo} …", file=sys.stderr)
+        base_sha = _get_branch_sha(t_owner, t_repo, base_branch)
+        _create_branch(t_owner, t_repo, target_branch, base_sha)
+    else:
+        # Push directly to the base branch (--no-pr mode)
+        target_branch = base_branch
+
+    # Check if file already exists on the target branch (need SHA to update)
+    existing_sha: str | None = None
+    r = SESSION.get(f"{file_url}?ref={target_branch}")
+    if r.status_code == 200:
+        existing_sha = r.json().get("sha")
+
+    # Commit the spec file to the target branch
+    put_body: dict = {
+        "message": commit_message,
+        "content": base64.b64encode(content.encode()).decode(),
+        "branch":  target_branch,
+    }
+    if existing_sha:
+        put_body["sha"] = existing_sha
+
+    r = SESSION.put(file_url, json=put_body)
+    if r.status_code not in (200, 201):
+        print(f"⛔  Upload failed ({r.status_code}): {r.text}", file=sys.stderr)
+        return
+
+    action   = "Updated" if existing_sha else "Created"
+    html_url = r.json().get("content", {}).get("html_url", "")
+    print(f"✓ {action} {file_path_in_repo} on branch {target_branch}", file=sys.stderr)
+    if html_url:
+        print(f"  {html_url}", file=sys.stderr)
+
+    # Open the PR
+    if not create_pr:
+        return
+
+    final_pr_title = pr_title or f"chore: add OpenAPI spec for {spec_slug.replace('-openapi-yaml', '')}"
+    final_pr_body  = pr_body or (
+        f"## OpenAPI Specification\n\n"
+        f"Auto-generated by `repo-to-openapi` skill from `{source_label}`.\n\n"
+        f"**File:** `{file_path_in_repo}`\n\n"
+        f"### Validation\n"
+        f"- [ ] Open in [Swagger Editor](https://editor.swagger.io/) to validate\n"
+        f"- [ ] Review endpoints match the source implementation\n"
+        f"- [ ] Compare against any existing JIRA API-First spec for contract drift\n\n"
+        f"🤖 Generated with [repo-to-openapi](https://github.com/EdytaLys/api-spec-mcp)\n"
+    )
+
+    print(f"  Opening PR: {target_branch} → {base_branch} …", file=sys.stderr)
+    pr_url = _create_pr(t_owner, t_repo, target_branch, base_branch, final_pr_title, final_pr_body)
+    print(f"✓ PR opened: {pr_url}", file=sys.stderr)
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate an OpenAPI spec by scanning a GitHub repository."
+        description=(
+            "Generate an OpenAPI 3.0 spec by scanning a GitHub repository or a local directory. "
+            "Pass either a GitHub URL (https://github.com/owner/repo) or a local path (/path/to/repo or .)."
+        )
     )
-    parser.add_argument("repo_url", help="GitHub repository URL, e.g. https://github.com/owner/repo")
-    parser.add_argument("--branch", "-b", default="", help="Branch name (default: repo default branch)")
-    parser.add_argument("--base-url", default="", help="Override the production server base URL")
-    parser.add_argument("--output", "-o", help="Output file path (default: <repo>-openapi.yaml)")
+    parser.add_argument(
+        "source",
+        help=(
+            "GitHub repo URL (https://github.com/owner/repo) "
+            "OR local directory path (/path/to/repo or .)"
+        ),
+    )
+    parser.add_argument("--branch", "-b", default="",
+                        help="Remote: branch to scan (default: repo default branch). "
+                             "Local: displayed in spec metadata only.")
+    parser.add_argument("--base-url", default="",
+                        help="Override the production server base URL in the spec")
+    parser.add_argument("--output", "-o",
+                        help="Local output file path (default: <repo-name>-openapi.yaml)")
     parser.add_argument("--format", "-f", choices=["yaml", "json"], default="yaml")
+    # Upload options
+    parser.add_argument("--upload-to",      metavar="REPO_URL",
+                        help="GitHub repo URL to upload the generated spec into "
+                             "(e.g. https://github.com/owner/specs-repo)")
+    parser.add_argument("--upload-path",    metavar="PATH",
+                        help="Path inside the target repo (default: specs/<filename>)")
+    parser.add_argument("--upload-branch",  metavar="BRANCH", default="main",
+                        help="Base branch for the PR in the target repo (default: main)")
+    parser.add_argument("--upload-message", metavar="MSG",
+                        help="Commit message for the file upload (default: auto-generated)")
+    parser.add_argument("--no-pr",          action="store_true",
+                        help="Push directly to --upload-branch instead of opening a PR")
+    parser.add_argument("--pr-title",       metavar="TITLE",
+                        help="Custom PR title (default: auto-generated)")
+    parser.add_argument("--pr-body",        metavar="BODY",
+                        help="Custom PR description (default: auto-generated)")
     args = parser.parse_args()
 
-    owner, repo_name = parse_github_url(args.repo_url)
-    branch = args.branch or default_branch(owner, repo_name)
-    description = repo_description(owner, repo_name)
+    source = args.source
 
-    print(f"Scanning {owner}/{repo_name}@{branch} …", file=sys.stderr)
+    # ── Determine if source is a local path or a remote GitHub URL ──────────
+    is_local = not source.startswith("http") and not source.startswith("git@")
+    if is_local:
+        local_root = Path(source).expanduser().resolve()
+        if not local_root.is_dir():
+            sys.exit(f"⛔  Local path does not exist or is not a directory: {local_root}")
 
-    tree = fetch_tree(owner, repo_name, branch)
-    file_paths = [f["path"] for f in tree]
+        repo_name    = local_root.name
+        source_label = str(local_root)
+        is_git       = _is_git_repo(local_root)
 
-    def fetcher(path: str) -> str:
-        return fetch_file(owner, repo_name, path, branch)
+        # Resolve branch: explicit flag > current checkout > "local" (non-git)
+        current_branch = local_git_branch(local_root) if is_git else ""
+        branch         = args.branch or current_branch or "local"
 
+        print(f"Scanning local path: {local_root} …", file=sys.stderr)
+        print(f"  Branch            : {branch}", file=sys.stderr)
+
+        if is_git and args.branch and args.branch != current_branch:
+            # Read files from the specified branch via git without checking it out
+            git_files = local_git_tree(local_root, branch)
+            if not git_files:
+                sys.exit(
+                    f"⛔  Branch {branch!r} not found in local repo, "
+                    f"or no files returned. Available branches:\n"
+                    + (_git(local_root, "branch", "--list") or "  (run git branch to check)")
+                )
+            print(f"  Reading from git branch (no checkout)", file=sys.stderr)
+            file_paths = git_files
+            fetcher    = local_git_fetcher(local_root, branch)
+        elif is_git:
+            # Use git ls-tree for the current branch (avoids noise dirs via .gitignore)
+            git_files = local_git_tree(local_root, branch)
+            if git_files:
+                file_paths = git_files
+                fetcher    = local_git_fetcher(local_root, branch)
+            else:
+                # Fall back to filesystem walk for untracked/new repos
+                file_paths = local_tree(local_root)
+                fetcher    = local_fetcher(local_root)
+        else:
+            # Not a git repo — walk the filesystem
+            file_paths = local_tree(local_root)
+            fetcher    = local_fetcher(local_root)
+
+        # Description from first non-heading line of README
+        description = ""
+        readme_text = fetcher("README.md") or fetcher("readme.md")
+        for line in readme_text.splitlines():
+            if line.strip() and not line.startswith("#"):
+                description = line.strip()
+                break
+
+        base_url = args.base_url or local_readme_base_url(local_root, fetcher) or "http://localhost:8080"
+
+    else:
+        owner, repo_name = parse_github_url(source)
+        branch      = args.branch or default_branch(owner, repo_name)
+        description = repo_description(owner, repo_name)
+        source_label = source
+
+        print(f"Scanning {owner}/{repo_name}@{branch} …", file=sys.stderr)
+
+        tree = fetch_tree(owner, repo_name, branch)
+        file_paths = [f["path"] for f in tree]
+
+        def fetcher(path: str) -> str:
+            return fetch_file(owner, repo_name, path, branch)
+
+        base_url = args.base_url
+        if not base_url:
+            readme = fetcher("README.md") or fetcher("readme.md")
+            m = re.search(r'https?://[^\s)\"\']+run\.app', readme)
+            base_url = m.group(0).rstrip("/") if m else "https://api.example.com/v1"
+
+    # ── Framework detection and parsing ─────────────────────────────────────
     framework = detect_framework(file_paths, fetcher)
     print(f"  Framework detected: {framework}", file=sys.stderr)
 
@@ -715,17 +1012,10 @@ def main():
     for ep in endpoints:
         print(f"    {ep['verb']:6s} {ep['path']}", file=sys.stderr)
 
-    # Determine production base URL
-    base_url = args.base_url
-    if not base_url:
-        # Try to read from README or application.properties
-        readme = fetcher("README.md") or fetcher("readme.md")
-        m = re.search(r'https?://[^\s)\"\']+run\.app', readme)
-        base_url = m.group(0).rstrip("/") if m else "https://api.example.com/v1"
+    # ── Build and serialise spec ─────────────────────────────────────────────
+    spec = build_spec(source_label, repo_name, repo_name, description, endpoints, schemas, base_url)
 
-    spec = build_spec(args.repo_url, owner, repo_name, description, endpoints, schemas, base_url)
-
-    ext      = "json" if args.format == "json" else "yaml"
+    ext          = "json" if args.format == "json" else "yaml"
     out_path_str = args.output or f"{repo_name}-openapi.{ext}"
 
     if args.format == "json" or yaml is None:
@@ -738,6 +1028,23 @@ def main():
 
     print(f"\n✓ Spec saved: {out_path_str}", file=sys.stderr)
     print(f"  Validate : https://editor.swagger.io/\n", file=sys.stderr)
+
+    # ── Optional upload ──────────────────────────────────────────────────────
+    if args.upload_to:
+        spec_filename = out_path_str.split("/")[-1]
+        upload_spec(
+            content=content,
+            target_repo_url=args.upload_to,
+            file_path_in_repo=args.upload_path or f"specs/{spec_filename}",
+            commit_message=args.upload_message
+                or f"chore: add OpenAPI spec scanned from {source_label}",
+            base_branch=args.upload_branch or "main",
+            source_label=source_label,
+            create_pr=not args.no_pr,
+            pr_title=args.pr_title or "",
+            pr_body=args.pr_body or "",
+        )
+
     print(content)
 
 
