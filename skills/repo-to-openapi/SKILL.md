@@ -73,8 +73,13 @@ python skills/repo-to-openapi/scripts/scan_repo.py <SOURCE> [options]
 **Upload to another repo** (requires `GITHUB_TOKEN` with write access to the target):
 - `--upload-to <REPO_URL>` — GitHub repo URL to push the spec into
 - `--upload-path <PATH>` — path inside the target repo (default: `specs/<filename>`)
-- `--upload-branch <BRANCH>` — branch to commit to (default: `main`)
-- `--upload-message <MSG>` — custom commit message
+- `--upload-branch <BRANCH>` — base branch for the PR (default: `main`)
+- `--upload-message <MSG>` — commit message for the file (default: auto-generated)
+- `--pr-title <TITLE>` — custom PR title (default: auto-generated)
+- `--pr-body <BODY>` — custom PR description (default: auto-generated)
+- `--no-pr` — push directly to `--upload-branch` instead of opening a PR
+
+By default, the spec is committed to a new branch (`chore/openapi-spec-<name>`) and a PR is opened against `--upload-branch`. Use `--no-pr` to skip the PR and push directly.
 
 **Examples:**
 
@@ -98,7 +103,7 @@ Current directory:
 python skills/repo-to-openapi/scripts/scan_repo.py .
 ```
 
-Scan remote repo and upload spec to another repo:
+Scan remote repo, upload spec, and open a PR (default behaviour):
 ```bash
 export GITHUB_TOKEN=ghp_yourtoken   # needs read on source + write on target
 python skills/repo-to-openapi/scripts/scan_repo.py \
@@ -106,15 +111,27 @@ python skills/repo-to-openapi/scripts/scan_repo.py \
   --upload-to https://github.com/EdytaLys/api-specs \
   --upload-path specs/task-manager-openapi.yaml \
   --upload-branch main
+# → commits to chore/openapi-spec-task-manager-openapi-yaml
+# → opens PR: chore/openapi-spec-... → main
 ```
 
-Scan local directory and upload spec to a repo:
+Push directly without a PR:
+```bash
+python skills/repo-to-openapi/scripts/scan_repo.py \
+  https://github.com/EdytaLys/task_manager_with_copilot \
+  --upload-to https://github.com/EdytaLys/api-specs \
+  --upload-path specs/task-manager-openapi.yaml \
+  --no-pr
+```
+
+Scan local directory, upload, and open PR with custom title:
 ```bash
 export GITHUB_TOKEN=ghp_yourtoken
 python skills/repo-to-openapi/scripts/scan_repo.py \
   /path/to/my-api-project \
   --upload-to https://github.com/EdytaLys/api-specs \
-  --upload-path specs/my-api-openapi.yaml
+  --upload-path specs/my-api-openapi.yaml \
+  --pr-title "feat: add OpenAPI spec for my-api"
 ```
 
 The script prints the full spec to stdout AND saves it to the output file.
