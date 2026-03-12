@@ -858,8 +858,8 @@ def upload_spec(
         f"🤖 Generated with [repo-to-openapi](https://github.com/EdytaLys/api-spec-mcp)\n"
     )
 
-    print(f"  Opening PR: {pr_branch} → {base_branch} …", file=sys.stderr)
-    pr_url = _create_pr(t_owner, t_repo, pr_branch, base_branch, final_pr_title, final_pr_body)
+    print(f"  Opening PR: {target_branch} → {base_branch} …", file=sys.stderr)
+    pr_url = _create_pr(t_owner, t_repo, target_branch, base_branch, final_pr_title, final_pr_body)
     print(f"✓ PR opened: {pr_url}", file=sys.stderr)
 
 

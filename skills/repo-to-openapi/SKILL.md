@@ -38,14 +38,18 @@ can be compared or merged in JIRA API-First workflows.
 
 ## Prerequisites
 
-```
+Create and activate a Python virtual environment, then install dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install requests pyyaml
 ```
 
 Optional — set `GITHUB_TOKEN` env var to raise the GitHub API rate limit from
 60 to 5000 requests/hour (needed for large repos):
 
-```
+```bash
 export GITHUB_TOKEN=ghp_...
 ```
 
@@ -85,6 +89,7 @@ By default, the spec is committed to a new branch (`chore/openapi-spec-<name>`) 
 
 Remote repo, scan only:
 ```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
 export GITHUB_TOKEN=ghp_yourtoken
 python skills/repo-to-openapi/scripts/scan_repo.py \
   https://github.com/EdytaLys/task_manager_with_copilot \
@@ -93,6 +98,7 @@ python skills/repo-to-openapi/scripts/scan_repo.py \
 
 Local directory:
 ```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
 python skills/repo-to-openapi/scripts/scan_repo.py \
   /path/to/my-api-project \
   --base-url https://my-api.example.com/v1
@@ -100,11 +106,13 @@ python skills/repo-to-openapi/scripts/scan_repo.py \
 
 Current directory:
 ```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
 python skills/repo-to-openapi/scripts/scan_repo.py .
 ```
 
 Scan remote repo, upload spec, and open a PR (default behaviour):
 ```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
 export GITHUB_TOKEN=ghp_yourtoken   # needs read on source + write on target
 python skills/repo-to-openapi/scripts/scan_repo.py \
   https://github.com/EdytaLys/task_manager_with_copilot \
@@ -117,6 +125,7 @@ python skills/repo-to-openapi/scripts/scan_repo.py \
 
 Push directly without a PR:
 ```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
 python skills/repo-to-openapi/scripts/scan_repo.py \
   https://github.com/EdytaLys/task_manager_with_copilot \
   --upload-to https://github.com/EdytaLys/api-specs \
@@ -126,6 +135,7 @@ python skills/repo-to-openapi/scripts/scan_repo.py \
 
 Scan local directory, upload, and open PR with custom title:
 ```bash
+python3 -m venv .venv && source .venv/bin/activate && pip install requests pyyaml
 export GITHUB_TOKEN=ghp_yourtoken
 python skills/repo-to-openapi/scripts/scan_repo.py \
   /path/to/my-api-project \
