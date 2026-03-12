@@ -880,6 +880,150 @@ def generate_report(diffs: list[dict], issue_key: str, summary: str) -> str:
     return "\n".join(lines)
 
 
+# ─── JIRA COMMENT POSTER ─────────────────────────────────────────────────────
+def _adf_para(text: str) -> dict:
+    return {"type": "paragraph", "content": [{"type": "text", "text": text}]}
+
+def _adf_heading(text: str, level: int = 3) -> dict:
+    return {"type": "heading", "attrs": {"level": level},
+            "content": [{"type": "text", "text": text}]}
+
+def _adf_bullet(items: list[str]) -> dict:
+    return {"type": "bulletList", "content": [
+        {"type": "listItem", "content": [_adf_para(i)]} for i in items
+    ]}
+
+def _adf_code(text: str, lang: str = "yaml") -> dict:
+    return {"type": "codeBlock", "attrs": {"language": lang},
+            "content": [{"type": "text", "text": text}]}
+
+
+def _extract_operation_yaml(spec_yaml: str, method: str) -> str:
+    """Pull the generated operation block out of the rendered YAML string."""
+    target = f"{method.lower()}:"
+    lines, in_op = [], False
+    for line in spec_yaml.splitlines():
+        stripped = line.strip()
+        if stripped == target:
+            in_op = True
+        elif in_op and stripped and not line.startswith("    ") and not line.startswith("  "):
+            break
+        if in_op:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+def build_comment_body(
+    issue_key: str,
+    summary: str,
+    diffs: list[dict],
+    merged_spec: dict,
+    spec_yaml: str,
+    detected_endpoints: list[tuple[str, str]],
+    fields_raw: dict[str, str],
+) -> dict:
+    """Build an ADF comment body with the change report and key spec sections."""
+    all_breaking = [m for d in diffs for m in d["breaking"]]
+    all_additive = [m for d in diffs for m in d["additive"]]
+    new_version   = merged_spec.get("info", {}).get("version", "?")
+
+    # ── Header ────────────────────────────────────────────────────────────────
+    content: list[dict] = [
+        _adf_heading("🤖 Auto-generated OpenAPI Change Report", level=2),
+    ]
+
+    # ── Per-endpoint verdict ───────────────────────────────────────────────────
+    for diff in diffs:
+        method = diff["method"]
+        path   = diff["path"]
+        status = diff["status"]
+
+        content.append(_adf_heading(f"{method} {path}", level=3))
+
+        if status == "new":
+            verdict_items = [
+                f"✅ NEW endpoint — additive change, no breaking impact",
+                f"No existing callers will be affected",
+            ]
+        elif status == "unchanged":
+            verdict_items = ["✔  No changes detected for this endpoint."]
+        else:
+            verdict_items = []
+            for msg in diff["breaking"]:
+                verdict_items.append(f"⚠️  BREAKING: {msg}")
+            for msg in diff["additive"]:
+                verdict_items.append(f"➕ {msg}")
+            if diff.get("summary_change"):
+                verdict_items.append(
+                    f"📝 Summary: '{diff['summary_change']['before']}' → '{diff['summary_change']['after']}'"
+                )
+
+        content.append(_adf_bullet(verdict_items))
+
+        # Embed the generated operation YAML for new/modified endpoints
+        if status in ("new", "modified"):
+            op_yaml = _extract_operation_yaml(spec_yaml, method)
+            if op_yaml:
+                content.append(_adf_heading("Generated operation", level=4))
+                content.append(_adf_code(op_yaml, "yaml"))
+
+    # ── Overall verdict ────────────────────────────────────────────────────────
+    content.append(_adf_heading("Overall verdict", level=3))
+    if all_breaking:
+        verdict_bullets = [
+            f"⚠️  BREAKING CHANGES — major version bump recommended",
+            f"Version: {new_version}",
+            "Coordinate with all API consumers before releasing",
+        ]
+        for msg in all_breaking:
+            verdict_bullets.append(f"✗ {msg}")
+    elif all_additive:
+        verdict_bullets = [
+            f"✅ All changes are ADDITIVE — backward compatible",
+            f"Version bumped to {new_version} (minor bump sufficient)",
+        ]
+    else:
+        verdict_bullets = [f"✔  No meaningful changes. Version: {new_version}"]
+    content.append(_adf_bullet(verdict_bullets))
+
+    # ── Request fields detected ────────────────────────────────────────────────
+    rf = fields_raw.get("API Request Fields", "")
+    if rf:
+        _, props = parse_request_fields(rf)
+        if props:
+            content.append(_adf_heading("Request schema detected", level=3))
+            schema_lines = ["type: object", "properties:"]
+            for fname, fdef in props.items():
+                fmt = f", format: {fdef['format']}" if "format" in fdef else ""
+                schema_lines.append(f"  {fname}: {{ type: {fdef['type']}{fmt} }}")
+            content.append(_adf_code("\n".join(schema_lines), "yaml"))
+
+    # ── Next steps ────────────────────────────────────────────────────────────
+    content.append(_adf_heading("Next steps", level=3))
+    content.append(_adf_bullet([
+        "Review and validate at https://editor.swagger.io/",
+        "Raise a PR to update specs/task-manager-openapi.yaml in api-spec-task-manager repo",
+        "Existing spec: https://github.com/EdytaLys/api-spec-task-manager/blob/main/specs/task-manager-openapi.yaml",
+    ]))
+    content.append(_adf_para(f"Generated by jira-to-openapi skill • generate_spec.py {issue_key}"))
+
+    return {"version": 1, "type": "doc", "content": content}
+
+
+def post_comment_to_jira(
+    issue_key: str,
+    comment_body: dict,
+) -> str | None:
+    """POST an ADF comment to the JIRA issue. Returns the comment URL on success."""
+    url = f"{CONFIG['base_url']}/rest/api/3/issue/{issue_key}/comment"
+    r = _jira_session().post(url, json={"body": comment_body})
+    if r.status_code in (200, 201):
+        comment_id = r.json().get("id", "?")
+        return f"{CONFIG['base_url']}/browse/{issue_key}?focusedCommentId={comment_id}"
+    print(f"  ⚠  Failed to post comment: {r.status_code} {r.text[:300]}", file=sys.stderr)
+    return None
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -902,6 +1046,8 @@ def main() -> None:
     )
     parser.add_argument("--report-only", action="store_true",
         help="Print the change report only; do not write the spec file.")
+    parser.add_argument("--post-comment", action="store_true",
+        help="Post the change report and generated operation as a comment on the JIRA issue.")
     args = parser.parse_args()
 
     key = args.issue_key.upper()
@@ -1065,6 +1211,23 @@ def main() -> None:
         print(f"  Version       : {merged_spec.get('info', {}).get('version', '?')}", file=sys.stderr)
         print(f"  Validate at   : https://editor.swagger.io/\n", file=sys.stderr)
         print(content)
+
+    # ── Post comment to JIRA ──────────────────────────────────────────────────
+    if args.post_comment:
+        if not diffs:
+            print("  ℹ  No diff available — skipping comment (run with --existing-spec to enable).",
+                  file=sys.stderr)
+        else:
+            print(f"\n  Posting comment to {key} …", file=sys.stderr)
+            comment_body = build_comment_body(
+                key, summary, diffs, merged_spec,
+                content, detected_endpoints, fields_raw,
+            )
+            comment_url = post_comment_to_jira(key, comment_body)
+            if comment_url:
+                print(f"  ✓ Comment posted: {comment_url}", file=sys.stderr)
+            else:
+                print("  ⚠  Comment posting failed.", file=sys.stderr)
 
 
 if __name__ == "__main__":
