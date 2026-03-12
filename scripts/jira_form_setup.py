@@ -101,8 +101,8 @@ CUSTOM_FIELDS = [
     {
         "name":        "API Existing Contract",
         "description": "URL or Confluence page of the existing OpenAPI spec (leave blank for new APIs).",
-        "type":        "com.atlassian.jira.plugin.system.customfieldtypes:url",
-        "searchKey":   "com.atlassian.jira.plugin.system.customfieldtypes:urlsearcher",
+        "type":        "com.atlassian.jira.plugin.system.customfieldtypes:textfield",
+        "searchKey":   "com.atlassian.jira.plugin.system.customfieldtypes:textsearcher",
         "required":    False,
         "hint":        "Link to the current OpenAPI/Swagger spec in Confluence or GitHub. Leave blank for new APIs.",
     },
