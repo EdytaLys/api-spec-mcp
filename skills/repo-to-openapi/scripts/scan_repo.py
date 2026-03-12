@@ -661,6 +661,51 @@ def build_spec(
         "tags": [{"name": t, "description": f"Operations on {t} resources"} for t in sorted(tags_seen)],
     }
 
+# ─── UPLOAD TO REPO ──────────────────────────────────────────────────────────
+
+def upload_spec(
+    content: str,
+    target_repo_url: str,
+    file_path_in_repo: str,
+    commit_message: str,
+    branch: str,
+) -> None:
+    """Create or update a file in a GitHub repo via the Contents API."""
+    if not GITHUB_TOKEN:
+        print("⚠  GITHUB_TOKEN is not set — cannot upload to target repo.", file=sys.stderr)
+        print("   Set GITHUB_TOKEN with write access to the target repo and retry.", file=sys.stderr)
+        return
+
+    t_owner, t_repo = parse_github_url(target_repo_url)
+    url = f"{GITHUB_API}/repos/{t_owner}/{t_repo}/contents/{file_path_in_repo}"
+
+    # Check if file already exists (need its SHA to update)
+    existing_sha: str | None = None
+    r = SESSION.get(f"{url}?ref={branch}")
+    if r.status_code == 200:
+        existing_sha = r.json().get("sha")
+    elif r.status_code not in (404,):
+        r.raise_for_status()
+
+    body: dict = {
+        "message": commit_message,
+        "content": base64.b64encode(content.encode()).decode(),
+        "branch":  branch,
+    }
+    if existing_sha:
+        body["sha"] = existing_sha
+
+    r = SESSION.put(url, json=body)
+    if r.status_code in (200, 201):
+        action = "Updated" if existing_sha else "Created"
+        html_url = r.json().get("content", {}).get("html_url", "")
+        print(f"✓ {action} {file_path_in_repo} in {t_owner}/{t_repo}@{branch}", file=sys.stderr)
+        if html_url:
+            print(f"  {html_url}", file=sys.stderr)
+    else:
+        print(f"⛔  Upload failed ({r.status_code}): {r.text}", file=sys.stderr)
+
+
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -668,10 +713,19 @@ def main():
         description="Generate an OpenAPI spec by scanning a GitHub repository."
     )
     parser.add_argument("repo_url", help="GitHub repository URL, e.g. https://github.com/owner/repo")
-    parser.add_argument("--branch", "-b", default="", help="Branch name (default: repo default branch)")
+    parser.add_argument("--branch", "-b", default="", help="Branch to scan (default: repo default branch)")
     parser.add_argument("--base-url", default="", help="Override the production server base URL")
-    parser.add_argument("--output", "-o", help="Output file path (default: <repo>-openapi.yaml)")
+    parser.add_argument("--output", "-o", help="Local output file path (default: <repo>-openapi.yaml)")
     parser.add_argument("--format", "-f", choices=["yaml", "json"], default="yaml")
+    # Upload options
+    parser.add_argument("--upload-to",      metavar="REPO_URL",
+                        help="GitHub repo URL to upload the spec to, e.g. https://github.com/owner/specs-repo")
+    parser.add_argument("--upload-path",    metavar="PATH",
+                        help="Path inside the target repo (default: specs/<filename>)")
+    parser.add_argument("--upload-branch",  metavar="BRANCH", default="main",
+                        help="Branch in the target repo to commit to (default: main)")
+    parser.add_argument("--upload-message", metavar="MSG",
+                        help="Commit message for the upload (default: auto-generated)")
     args = parser.parse_args()
 
     owner, repo_name = parse_github_url(args.repo_url)
@@ -738,6 +792,18 @@ def main():
 
     print(f"\n✓ Spec saved: {out_path_str}", file=sys.stderr)
     print(f"  Validate : https://editor.swagger.io/\n", file=sys.stderr)
+
+    # Upload to a target repo if requested
+    if args.upload_to:
+        upload_spec(
+            content=content,
+            target_repo_url=args.upload_to,
+            file_path_in_repo=args.upload_path or f"specs/{out_path_str.split('/')[-1]}",
+            commit_message=args.upload_message
+                or f"chore: add OpenAPI spec scanned from {args.repo_url}",
+            branch=args.upload_branch or "main",
+        )
+
     print(content)
 
 

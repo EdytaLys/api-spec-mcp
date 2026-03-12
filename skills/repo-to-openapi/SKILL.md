@@ -57,15 +57,33 @@ python skills/repo-to-openapi/scripts/scan_repo.py <GITHUB_URL> [options]
 - `<GITHUB_URL>` — required. E.g. `https://github.com/owner/repo`
 - `--branch <name>` — branch to scan (default: repo's default branch)
 - `--base-url <url>` — override production server URL (auto-detected from README if omitted)
-- `--output <path>` — defaults to `<repo-name>-openapi.yaml` in CWD
+- `--output <path>` — local output file path (default: `<repo-name>-openapi.yaml` in CWD)
 - `--format json` — output JSON instead of YAML
 
-**Example:**
+**Upload to another repo (requires `GITHUB_TOKEN` with write access):**
+- `--upload-to <REPO_URL>` — GitHub repo URL to push the spec into
+- `--upload-path <PATH>` — path inside the target repo (default: `specs/<filename>`)
+- `--upload-branch <BRANCH>` — branch to commit to in the target repo (default: `main`)
+- `--upload-message <MSG>` — custom commit message
+
+**Examples:**
+
+Scan only:
 ```bash
 export GITHUB_TOKEN=ghp_yourtoken
 python skills/repo-to-openapi/scripts/scan_repo.py \
   https://github.com/EdytaLys/task_manager_with_copilot \
   --base-url https://task-manager-with-copilot-server-535572860478.europe-west1.run.app
+```
+
+Scan and upload to another repo:
+```bash
+export GITHUB_TOKEN=ghp_yourtoken   # needs read on source + write on target
+python skills/repo-to-openapi/scripts/scan_repo.py \
+  https://github.com/EdytaLys/task_manager_with_copilot \
+  --upload-to https://github.com/EdytaLys/api-specs \
+  --upload-path specs/task-manager-openapi.yaml \
+  --upload-branch main
 ```
 
 The script prints the full spec to stdout AND saves it to the output file.
