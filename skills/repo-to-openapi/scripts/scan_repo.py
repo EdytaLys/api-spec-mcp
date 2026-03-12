@@ -102,6 +102,37 @@ def repo_description(owner: str, repo: str) -> str:
 
 # ─── LOCAL REPO HELPERS ───────────────────────────────────────────────────────
 
+import subprocess
+
+def _git(root: Path, *args: str) -> str:
+    """Run a git command in root and return stdout, or '' on error."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.stdout if result.returncode == 0 else ""
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
+
+def _is_git_repo(root: Path) -> bool:
+    return bool(_git(root, "rev-parse", "--git-dir").strip())
+
+def local_git_branch(root: Path) -> str:
+    """Return the currently checked-out branch name, or ''."""
+    return _git(root, "rev-parse", "--abbrev-ref", "HEAD").strip()
+
+def local_git_tree(root: Path, branch: str) -> list[str]:
+    """List all file paths in a git branch (no checkout needed)."""
+    out = _git(root, "ls-tree", "-r", "--name-only", branch)
+    return [line for line in out.splitlines() if line]
+
+def local_git_fetcher(root: Path, branch: str):
+    """Return a fetcher that reads file content from a specific git branch."""
+    def _fetch(rel_path: str) -> str:
+        return _git(root, "show", f"{branch}:{rel_path}")
+    return _fetch
+
 def local_tree(root: Path) -> list[str]:
     """Return relative POSIX paths of all files under root, skipping common noise dirs."""
     _skip = {".git", "node_modules", "__pycache__", ".gradle", "target", "build",
@@ -113,7 +144,7 @@ def local_tree(root: Path) -> list[str]:
     return paths
 
 def local_fetcher(root: Path):
-    """Return a fetcher function that reads files from a local directory."""
+    """Return a fetcher that reads files from the working tree on disk."""
     def _fetch(rel_path: str) -> str:
         full = root / rel_path
         try:
@@ -122,23 +153,18 @@ def local_fetcher(root: Path):
             return ""
     return _fetch
 
-def local_readme_base_url(root: Path) -> str:
-    """Try to extract a production URL from README in a local repo."""
+def local_readme_base_url(root: Path, fetcher=None) -> str:
+    """Try to extract a production URL from README."""
     for name in ("README.md", "readme.md", "README.rst"):
-        p = root / name
-        if p.exists():
-            m = re.search(r'https?://[^\s)\"\']+run\.app', p.read_text(errors="replace"))
+        text = fetcher(name) if fetcher else ""
+        if not text:
+            p = root / name
+            if p.exists():
+                text = p.read_text(errors="replace")
+        if text:
+            m = re.search(r'https?://[^\s)\"\']+run\.app', text)
             if m:
                 return m.group(0).rstrip("/")
-    return ""
-
-def local_git_branch(root: Path) -> str:
-    """Return current git branch of a local repo, or empty string."""
-    head = root / ".git" / "HEAD"
-    if head.exists():
-        content = head.read_text().strip()
-        if content.startswith("ref: refs/heads/"):
-            return content[len("ref: refs/heads/"):]
     return ""
 
 # ─── FRAMEWORK DETECTION ──────────────────────────────────────────────────────
@@ -801,26 +827,53 @@ def main():
         if not local_root.is_dir():
             sys.exit(f"⛔  Local path does not exist or is not a directory: {local_root}")
 
-        repo_name   = local_root.name
+        repo_name    = local_root.name
         source_label = str(local_root)
-        branch      = args.branch or local_git_branch(local_root) or "local"
-        description = ""
-        # Try to read description from README first line after title
-        readme_path = local_root / "README.md"
-        if readme_path.exists():
-            lines = readme_path.read_text(errors="replace").splitlines()
-            for line in lines:
-                if line.strip() and not line.startswith("#"):
-                    description = line.strip()
-                    break
+        is_git       = _is_git_repo(local_root)
+
+        # Resolve branch: explicit flag > current checkout > "local" (non-git)
+        current_branch = local_git_branch(local_root) if is_git else ""
+        branch         = args.branch or current_branch or "local"
 
         print(f"Scanning local path: {local_root} …", file=sys.stderr)
         print(f"  Branch            : {branch}", file=sys.stderr)
 
-        file_paths = local_tree(local_root)
-        fetcher    = local_fetcher(local_root)
+        if is_git and args.branch and args.branch != current_branch:
+            # Read files from the specified branch via git without checking it out
+            git_files = local_git_tree(local_root, branch)
+            if not git_files:
+                sys.exit(
+                    f"⛔  Branch {branch!r} not found in local repo, "
+                    f"or no files returned. Available branches:\n"
+                    + (_git(local_root, "branch", "--list") or "  (run git branch to check)")
+                )
+            print(f"  Reading from git branch (no checkout)", file=sys.stderr)
+            file_paths = git_files
+            fetcher    = local_git_fetcher(local_root, branch)
+        elif is_git:
+            # Use git ls-tree for the current branch (avoids noise dirs via .gitignore)
+            git_files = local_git_tree(local_root, branch)
+            if git_files:
+                file_paths = git_files
+                fetcher    = local_git_fetcher(local_root, branch)
+            else:
+                # Fall back to filesystem walk for untracked/new repos
+                file_paths = local_tree(local_root)
+                fetcher    = local_fetcher(local_root)
+        else:
+            # Not a git repo — walk the filesystem
+            file_paths = local_tree(local_root)
+            fetcher    = local_fetcher(local_root)
 
-        base_url = args.base_url or local_readme_base_url(local_root) or "http://localhost:8080"
+        # Description from first non-heading line of README
+        description = ""
+        readme_text = fetcher("README.md") or fetcher("readme.md")
+        for line in readme_text.splitlines():
+            if line.strip() and not line.startswith("#"):
+                description = line.strip()
+                break
+
+        base_url = args.base_url or local_readme_base_url(local_root, fetcher) or "http://localhost:8080"
 
     else:
         owner, repo_name = parse_github_url(source)

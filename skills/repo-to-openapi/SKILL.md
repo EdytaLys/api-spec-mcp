@@ -65,7 +65,7 @@ python skills/repo-to-openapi/scripts/scan_repo.py <SOURCE> [options]
 | `.` | Scans the current working directory |
 
 **Common arguments:**
-- `--branch <name>` — remote: branch to scan (default: repo default). Local: shown in spec metadata only.
+- `--branch <name>` — branch to scan. Remote: defaults to repo's default branch. Local git repo: reads that branch's content via `git show` without changing your checkout; defaults to the current branch.
 - `--base-url <url>` — override production server URL (auto-detected from README if omitted; local repos default to `http://localhost:8080`)
 - `--output <path>` — local output file path (default: `<repo-name>-openapi.yaml` in CWD)
 - `--format json` — output JSON instead of YAML
