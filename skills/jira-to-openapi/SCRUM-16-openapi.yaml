@@ -1,0 +1,93 @@
+openapi: 3.0.3
+info:
+  title: Create /api/tasks/{id} endpoint
+  description: As a developer, I want /api/tasks/{id} so that Partiall update of the
+    task
+  version: 1.0.0
+  x-jira-issue: SCRUM-16
+  x-generated-at: '2026-03-12T14:21:40.158948Z'
+servers:
+- url: https://api.example.com/v1
+  description: Production
+- url: https://staging-api.example.com/v1
+  description: Staging
+paths:
+  /api/tasks/{id}:
+    patch:
+      summary: Create /api/tasks/{id} endpoint
+      description: 'As a developer, I want /api/tasks/{id} so that Partiall update
+        of the task
+
+
+        **Validation rules:**
+
+        - Email must be valid format and unique in the system
+
+        - Age must be between 18 and 100
+
+        - Title must be unique within the project
+
+        - Password must be at least 8 characters with uppercase, lowercase, and number'
+      operationId: patchApiTasks
+      tags:
+      - Task
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          description: Invalid email format
+        '404':
+          description: Resource not found
+        '409':
+          description: Email already registered
+        '422':
+          description: Validation failed
+        '401':
+          description: Unauthorized
+        '500':
+          description: Internal server error
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskRequest'
+components:
+  schemas:
+    TaskRequest:
+      type: object
+      properties:
+        title: &id001
+          type: string
+        description: &id002
+          type: string
+        status: &id003
+          type: string
+        dueDate: &id004
+          type: string
+          format: date
+    TaskResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique resource identifier
+        title: *id001
+        description: *id002
+        status: *id003
+        dueDate: *id004
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+security:
+- BearerAuth: []
+tags:
+- name: Task
+  description: Operations on Task resources
