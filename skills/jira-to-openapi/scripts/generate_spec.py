@@ -148,6 +148,171 @@ def extract_value(raw) -> str:
         return raw.get("value", str(raw))
     return str(raw)
 
+
+# ─── DESCRIPTION SECTION PARSER ──────────────────────────────────────────────
+# Lines that are placeholder instructions — not real data
+_PLACEHOLDER_PATTERNS = [
+    re.compile(r"📝"),
+    re.compile(r"^examples?:?$", re.IGNORECASE),
+    re.compile(r"^please specify", re.IGNORECASE),
+    re.compile(r"\(for PATCH endpoints\)", re.IGNORECASE),
+    re.compile(r"^e\.?g\.?[\s:]", re.IGNORECASE),
+]
+
+def _is_placeholder(line: str) -> bool:
+    return any(p.search(line) for p in _PLACEHOLDER_PATTERNS)
+
+
+def _node_text(node: dict) -> str:
+    """Extract plain text from a single ADF node (no recursion into lists)."""
+    return "".join(
+        n.get("text", "") for n in node.get("content", []) if n.get("type") == "text"
+    )
+
+
+def parse_description_sections(adf_doc: dict | None) -> dict[str, list[str]]:
+    """
+    Walk an ADF document and group bullet/paragraph lines under their nearest
+    heading. Returns {normalised_heading: [non-placeholder lines]}.
+
+    Normalised heading = lower-cased, stripped heading text.
+    """
+    if not adf_doc:
+        return {}
+
+    sections: dict[str, list[str]] = {}
+    current_heading: str | None = None
+    intro_lines: list[str] = []   # lines before the first heading
+
+    for child in adf_doc.get("content", []):
+        t = child.get("type", "")
+
+        if t == "heading":
+            current_heading = _node_text(child).strip().lower()
+            sections.setdefault(current_heading, [])
+
+        elif t == "paragraph":
+            text = _node_text(child).strip()
+            if not text or _is_placeholder(text):
+                continue
+            if current_heading is None:
+                intro_lines.append(text)
+            else:
+                sections[current_heading].append(text)
+
+        elif t in ("bulletList", "orderedList"):
+            for item in child.get("content", []):
+                # listItem → paragraph(s) → text nodes
+                parts: list[str] = []
+                for para in item.get("content", []):
+                    for n in para.get("content", []):
+                        if n.get("type") == "text":
+                            parts.append(n["text"])
+                line = "".join(parts).strip()
+                if not line or _is_placeholder(line):
+                    continue
+                if current_heading is None:
+                    intro_lines.append(line)
+                else:
+                    sections.setdefault(current_heading, []).append(line)
+
+    # Store intro paragraph under a synthetic key
+    if intro_lines:
+        sections["_intro"] = intro_lines
+
+    return sections
+
+
+# Heading aliases → canonical field names used internally
+_SECTION_ALIASES: dict[str, str] = {
+    # endpoints
+    "new endpoints to create":  "endpoints",
+    "new endpoint":             "endpoints",
+    "endpoint":                 "endpoints",
+    "endpoints":                "endpoints",
+    # request fields
+    "request fields":           "request_fields",
+    "request body":             "request_fields",
+    "fields":                   "request_fields",
+    # validation
+    "validation rules":         "validation_rules",
+    "validation":               "validation_rules",
+    "business rules":           "validation_rules",
+    # errors
+    "error scenarios":          "error_scenarios",
+    "errors":                   "error_scenarios",
+    "error cases":              "error_scenarios",
+    # acceptance criteria
+    "acceptance criteria":      "acceptance_criteria",
+    "done criteria":            "acceptance_criteria",
+    # context / purpose
+    "context":                  "context",
+    "description":              "context",
+    "background":               "context",
+    # required changes
+    "required changes":         "required_changes",
+    "changes":                  "required_changes",
+}
+
+def normalise_sections(raw: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Map raw heading keys to canonical names using _SECTION_ALIASES."""
+    out: dict[str, list[str]] = {}
+    for heading, lines in raw.items():
+        canonical = _SECTION_ALIASES.get(heading, heading)
+        out.setdefault(canonical, []).extend(lines)
+    return out
+
+
+def extract_fields_from_description(adf_doc: dict | None) -> dict[str, str]:
+    """
+    Parse the JIRA description ADF and return a dict with the same keys as
+    fields_raw (API Purpose, API Request Fields, etc.) so it can be merged.
+    """
+    raw_sections = parse_description_sections(adf_doc)
+    sec = normalise_sections(raw_sections)
+
+    result: dict[str, str] = {}
+
+    # API Purpose — from context section or intro paragraph
+    purpose_lines = sec.get("context", []) + sec.get("_intro", [])
+    if purpose_lines:
+        result["API Purpose"] = "\n".join(purpose_lines)
+
+    # API Request Fields — lines like "title, string, optional"
+    rf_lines = sec.get("request_fields", [])
+    if rf_lines:
+        result["API Request Fields"] = "\n".join(rf_lines)
+
+    # API Validation Rules
+    vr_lines = sec.get("validation_rules", [])
+    if vr_lines:
+        result["API Validation Rules"] = "\n".join(f"- {l.lstrip('- ')}" for l in vr_lines)
+
+    # API Error Scenarios
+    es_lines = sec.get("error_scenarios", [])
+    if es_lines:
+        result["API Error Scenarios"] = "\n".join(es_lines)
+
+    # Acceptance criteria — stored as plain text for description embedding
+    ac_lines = sec.get("acceptance_criteria", [])
+    if ac_lines:
+        result["_acceptance_criteria"] = "\n".join(ac_lines)
+
+    # Required changes — stored for description context
+    rc_lines = sec.get("required_changes", [])
+    if rc_lines:
+        result["_required_changes"] = "\n".join(f"- {l.lstrip('- ')}" for l in rc_lines)
+
+    # Endpoint method from "endpoints" section (e.g. "PATCH /api/tasks/{id}")
+    ep_lines = sec.get("endpoints", [])
+    for line in ep_lines:
+        m = _ENDPOINT_RE.search(line)
+        if m:
+            result["API HTTP Method"] = m.group(1).upper()
+            break   # first endpoint wins; multi-endpoint handled by parse_endpoints_from_text
+
+    return result
+
 # ─── PARSERS ─────────────────────────────────────────────────────────────────
 _ENDPOINT_RE = re.compile(
     r"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[^\s,\n]+)", re.IGNORECASE
@@ -297,13 +462,19 @@ def build_operation(
     properties: dict,
     error_map: dict[str, str],
     schemas: dict,
+    acceptance_criteria: str = "",
+    required_changes: str = "",
 ) -> dict:
     """Build a single OpenAPI operation object and populate schemas."""
     res = resource_name(path)
 
     op_desc = purpose.strip()
+    if required_changes.strip() and not op_desc:
+        op_desc = required_changes.strip()
     if rules.strip():
         op_desc += "\n\n**Validation rules:**\n" + rules.strip()
+    if acceptance_criteria.strip():
+        op_desc += "\n\n**Acceptance criteria:**\n" + acceptance_criteria.strip()
 
     # Determine success status code
     success_code = "201" if method == "POST" else "200"
@@ -365,34 +536,36 @@ def build_spec(
     fields: dict[str, str],
     summary: str,
     override_path: str | None = None,
+    override_method: str | None = None,
 ) -> dict:
     """Build a standalone OpenAPI 3.0 spec from JIRA field values."""
-    method   = (fields.get("API HTTP Method") or "POST").upper()
+    method   = (override_method or fields.get("API HTTP Method") or "POST").upper()
     path     = override_path or parse_path(summary)
     purpose  = fields.get("API Purpose", "")
     rules    = fields.get("API Validation Rules", "")
     consumers = fields.get("API Consumers", "")
     contract  = fields.get("API Existing Contract", "")
     chg_type  = fields.get("API Change Type", "")
+    ac_text   = fields.get("_acceptance_criteria", "")
+    rc_text   = fields.get("_required_changes", "")
 
     req_fields, properties = parse_request_fields(fields.get("API Request Fields", ""))
     error_map = parse_error_scenarios(fields.get("API Error Scenarios", ""))
 
-    # Check "New endpoints to create" section in purpose / raw description
-    endpoints_text = "\n".join([
-        fields.get("API Purpose", ""),
-        fields.get("API Request Fields", ""),
-        summary,
-    ])
-    detected = parse_endpoints_from_text(endpoints_text)
-    if detected:
-        method, path = detected[0]   # use first detected endpoint
+    # Enrich purpose with required-changes context if purpose is sparse
+    if rc_text and not purpose:
+        purpose = rc_text
+
+    # NOTE: endpoint detection is done in main() before calling build_spec;
+    # build_spec receives override_path so no endpoint regex scanning here.
 
     schemas: dict = {}
     res = resource_name(path)
     operation = build_operation(
         method, path, summary, purpose, rules,
         req_fields, properties, error_map, schemas,
+        acceptance_criteria=ac_text,
+        required_changes=rc_text,
     )
 
     info_extra: dict = {"x-jira-issue": issue_key}
@@ -475,8 +648,8 @@ def compare_operations(
         "summary_change": None,
     }
 
-    if existing_op is None and new_op is None:
-        return diff  # nothing to compare
+    if new_op is None:
+        return diff  # new spec didn't generate this operation — skip
 
     if existing_op is None:
         diff["status"] = "new"
@@ -738,44 +911,73 @@ def main() -> None:
 
     print(f"\nFetching {key} from {CONFIG['base_url']} …", file=sys.stderr)
     field_ids = load_field_ids()
-    if not field_ids:
-        sys.exit("⛔  No custom field IDs found. Run scripts/jira_form_setup.py first.")
 
     issue   = fetch_issue(key)
     summary = issue["fields"].get("summary", key)
     raw     = issue["fields"]
     print(f"  Summary : {summary}", file=sys.stderr)
 
-    # Extract raw field values
+    # 1. Extract custom field values (may all be empty for stories using the
+    #    free-text description template rather than structured custom fields)
     fields_raw: dict[str, str] = {}
-    for name, fid in field_ids.items():
-        fields_raw[name] = extract_value(raw.get(fid))
-        status = "✓" if fields_raw[name] else "○ (empty)"
-        print(f"  {status}  {name}", file=sys.stderr)
+    if field_ids:
+        for name, fid in field_ids.items():
+            fields_raw[name] = extract_value(raw.get(fid))
+            status = "✓" if fields_raw[name] else "○ (empty)"
+            print(f"  {status}  {name}", file=sys.stderr)
+    else:
+        print("  ⚠  No custom field IDs — falling back to description sections only",
+              file=sys.stderr)
 
-    # Detect endpoints from story — scan purpose + request fields + summary
-    full_text = "\n".join([
-        summary,
-        fields_raw.get("API Purpose", ""),
-        fields_raw.get("API Request Fields", ""),
-    ])
-    detected_endpoints = parse_endpoints_from_text(full_text)
+    # 2. Parse description sections and overlay any values that custom fields
+    #    left empty.  Description wins for fields it has content for.
+    desc_adf = raw.get("description")
+    desc_fields = extract_fields_from_description(desc_adf)
+
+    for key_name, value in desc_fields.items():
+        if value and (not fields_raw.get(key_name) or key_name.startswith("_")):
+            fields_raw[key_name] = value
+            if not key_name.startswith("_"):
+                print(f"  ✓  {key_name} (from description)", file=sys.stderr)
+
+    # 3. Detect NEW endpoints only — restrict search to safe sources so that
+    #    references to existing endpoints ("Keep PUT …", "existing GET …") in
+    #    Context / Required-changes sections are never picked up.
+    #
+    #    Priority (highest → lowest):
+    #      a) "New endpoints to create" / "Endpoints" description section
+    #      b) Story summary line
+    #      c) API HTTP Method custom field + parsed path
+    raw_sections = parse_description_sections(desc_adf)
+    norm_sections = normalise_sections(raw_sections)
+
+    # (a) Explicit "endpoints" section
+    ep_section_lines = norm_sections.get("endpoints", [])
+    detected_endpoints = parse_endpoints_from_text("\n".join(ep_section_lines))
+
+    # (b) Summary line (covers "Add PATCH /api/tasks/{id} …" pattern)
     if not detected_endpoints:
-        # Fall back to HTTP method field + path flag/parse
+        detected_endpoints = parse_endpoints_from_text(summary)
+
+    # (c) Custom field fallback
+    if not detected_endpoints:
         method = (fields_raw.get("API HTTP Method") or "POST").upper()
         path   = args.path or parse_path(summary)
         detected_endpoints = [(method, path)]
 
     if args.path:
-        # Override path for first detected endpoint
         detected_endpoints[0] = (detected_endpoints[0][0], args.path)
 
     print(f"\n  Endpoints in this story:", file=sys.stderr)
     for m, p in detected_endpoints:
         print(f"    {m} {p}", file=sys.stderr)
 
-    # Build the new spec
-    new_spec = build_spec(key, fields_raw, summary, override_path=detected_endpoints[0][1])
+    # Build the new spec — pass both the detected method and path
+    new_spec = build_spec(
+        key, fields_raw, summary,
+        override_path=detected_endpoints[0][1],
+        override_method=detected_endpoints[0][0],
+    )
 
     # If multiple endpoints detected, add them all
     if len(detected_endpoints) > 1:
@@ -788,6 +990,8 @@ def main() -> None:
                 fields_raw.get("API Purpose", ""),
                 fields_raw.get("API Validation Rules", ""),
                 req_fields, properties, error_map, schemas,
+                acceptance_criteria=fields_raw.get("_acceptance_criteria", ""),
+                required_changes=fields_raw.get("_required_changes", ""),
             )
             new_spec["paths"].setdefault(path, {})[method.lower()] = op
 
