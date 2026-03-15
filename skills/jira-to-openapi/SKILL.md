@@ -25,7 +25,7 @@ If an existing spec URL is provided (GitHub or local), the script also:
 - Outputs a plain-English change report
 - Produces a **merged** spec with the new endpoint integrated and the version bumped automatically
 - Produces a **standalone endpoint-only spec** ready to paste into Swagger Editor
-- Optionally **creates a JIRA subtask** containing the change report and the Swagger-ready YAML
+- **Always creates a JIRA subtask** containing the change report and the Swagger-ready YAML (use `--no-subtask` to skip)
 
 ## Prerequisites
 
@@ -48,33 +48,24 @@ or resolved live from the JIRA API if that file is absent.
 source /tmp/jira_venv/bin/activate   # or: python3 -m venv .venv && source .venv/bin/activate
 pip install requests pyyaml
 
-# Basic: generate spec from a JIRA story
+# Generate spec from a JIRA story — always diffs against the canonical spec and creates a subtask
 python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42
 
-# With output file name
-python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 --output specs/patch-tasks.yaml
+# Skip subtask creation (e.g. for a quick local preview)
+python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 --no-subtask
 
-# With JSON output
-python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 --format json
+# Compare against a different existing spec
+python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
+    --existing-spec https://github.com/EdytaLys/api-spec-task-manager/blob/main/specs/task-manager-openapi.yaml
+
+# Print change report only, without writing the spec file or creating a subtask
+python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 --report-only --no-subtask
 
 # Override path if auto-detection fails
 python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 --path /api/tasks/{id}
 
-# Compare against existing spec and produce a change report
-python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
-    --existing-spec https://github.com/EdytaLys/api-spec-task-manager/blob/main/specs/task-manager-openapi.yaml
-
-# Print change report only, without writing the spec file
-python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
-    --existing-spec <url> --report-only
-
-# Create a JIRA subtask with the change report and the Swagger-ready spec
-python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
-    --existing-spec <url> --create-subtask
-
-# Create subtask under a different project
-python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
-    --existing-spec <url> --create-subtask --project PROJ
+# Create subtask under a different JIRA project
+python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 --project PROJ
 ```
 
 ## Arguments
@@ -85,9 +76,9 @@ python skills/jira-to-openapi/scripts/generate_spec.py SCRUM-42 \
 | `--output`, `-o` | Output file path (default: `<KEY>-openapi.yaml`) |
 | `--format` | `yaml` (default) or `json` |
 | `--path` | Override auto-detected endpoint path |
-| `--existing-spec` | GitHub blob URL, raw URL, or local path to the current spec |
+| `--existing-spec` | GitHub blob URL, raw URL, or local path to compare against (default: canonical repo spec) |
 | `--report-only` | Print change report without writing the spec file |
-| `--create-subtask` | Create a JIRA subtask with the change report and Swagger-ready YAML |
+| `--no-subtask` | Skip JIRA subtask creation (subtask is created by default) |
 | `--project` | JIRA project key for the subtask (default: `SCRUM`) |
 
 ## Output files
@@ -158,7 +149,7 @@ Both formats are parsed automatically — no configuration required.
    - Breaking changes → major bump (`2.0.0`)
    - Additive changes → minor bump (`1.1.0`)
 8. **Writes** three files: endpoint-only YAML, full merged YAML, and change report
-9. **Creates a JIRA subtask** (if `--create-subtask`) with:
+9. **Always creates a JIRA subtask** (use `--no-subtask` to skip) with:
    - Per-endpoint verdict (new / modified / unchanged)
    - Full Swagger-pasteable YAML in a code block
    - Overall verdict and version bump recommendation
