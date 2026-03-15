@@ -47,22 +47,6 @@ CONFIG = {
     "github_token": os.environ.get("GITHUB_TOKEN", ""),
 }
 
-_FIELD_CONFIG_CANDIDATES = [
-    Path("scripts/jira_field_config.json"),
-    Path(__file__).parent.parent.parent / "scripts/jira_field_config.json",
-    Path(__file__).parent / "jira_field_config.json",
-]
-
-FIELD_CONFIG_MAP = {
-    "API Purpose":           "apiPurpose",
-    "API HTTP Method":       "apiHttpMethod",
-    "API Request Fields":    "apiRequestFields",
-    "API Validation Rules":  "apiValidationRules",
-    "API Consumers":         "apiConsumers",
-    "API Error Scenarios":   "apiErrorScenarios",
-    "API Existing Contract": "apiExistingContract",
-    "API Change Type":       "apiChangeType",
-}
 
 TYPE_MAP = {
     "integer": ("integer", None),   "int":      ("integer", None),
@@ -97,27 +81,6 @@ def fetch_issue(issue_key: str) -> dict:
     r.raise_for_status()
     return r.json()
 
-def fetch_all_fields() -> dict[str, str]:
-    r = _jira_session().get(f"{CONFIG['base_url']}/rest/api/3/field")
-    r.raise_for_status()
-    return {f["name"]: f["id"] for f in r.json()}
-
-# ─── FIELD ID RESOLUTION ─────────────────────────────────────────────────────
-def load_field_ids() -> dict[str, str]:
-    for candidate in _FIELD_CONFIG_CANDIDATES:
-        if candidate.exists():
-            with open(candidate) as f:
-                cfg = json.load(f)
-            custom = cfg.get("customFields", {})
-            ids = {
-                name: custom[key]
-                for name, key in FIELD_CONFIG_MAP.items()
-                if key in custom and "XXXXX" not in custom.get(key, "XXXXX")
-            }
-            if len(ids) >= 6:
-                return ids
-    live = fetch_all_fields()
-    return {name: live[name] for name in FIELD_CONFIG_MAP if name in live}
 
 # ─── ADF → PLAIN TEXT ────────────────────────────────────────────────────────
 def adf_to_text(node) -> str:
@@ -1186,35 +1149,22 @@ def main() -> None:
         sys.exit("⛔  Set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN env vars.")
 
     print(f"\nFetching {key} from {CONFIG['base_url']} …", file=sys.stderr)
-    field_ids = load_field_ids()
 
     issue   = fetch_issue(key)
     summary = issue["fields"].get("summary", key)
     raw     = issue["fields"]
     print(f"  Summary : {summary}", file=sys.stderr)
 
-    # 1. Extract custom field values (may all be empty for stories using the
-    #    free-text description template rather than structured custom fields)
-    fields_raw: dict[str, str] = {}
-    if field_ids:
-        for name, fid in field_ids.items():
-            fields_raw[name] = extract_value(raw.get(fid))
-            status = "✓" if fields_raw[name] else "○ (empty)"
-            print(f"  {status}  {name}", file=sys.stderr)
-    else:
-        print("  ⚠  No custom field IDs — falling back to description sections only",
-              file=sys.stderr)
-
-    # 2. Parse description sections and overlay any values that custom fields
-    #    left empty.  Description wins for fields it has content for.
+    # Extract all fields from the description sections
     desc_adf = raw.get("description")
     desc_fields = extract_fields_from_description(desc_adf)
 
+    fields_raw: dict[str, str] = {}
     for key_name, value in desc_fields.items():
-        if value and (not fields_raw.get(key_name) or key_name.startswith("_")):
+        if value:
             fields_raw[key_name] = value
             if not key_name.startswith("_"):
-                print(f"  ✓  {key_name} (from description)", file=sys.stderr)
+                print(f"  ✓  {key_name}", file=sys.stderr)
 
     # 3. Detect NEW endpoints only — restrict search to safe sources so that
     #    references to existing endpoints ("Keep PUT …", "existing GET …") in
