@@ -913,6 +913,80 @@ def _extract_operation_yaml(spec_yaml: str, method: str) -> str:
     return "\n".join(lines)
 
 
+def _plain_english_summary(
+    story_summary: str,
+    diffs: list[dict],
+    detected_endpoints: list[tuple[str, str]],
+    fields_raw: dict[str, str],
+) -> list[str]:
+    """
+    Return a list of plain-English sentences describing what changed in the API.
+    Each item becomes a separate bullet in the 'What changed' section.
+    """
+    purpose     = fields_raw.get("API Purpose", "").strip()
+    consumers   = fields_raw.get("API Consumers", "").strip()
+    change_type = fields_raw.get("API Change Type", "").strip()
+    sentences: list[str] = []
+
+    if not diffs:
+        # No existing spec to diff against — describe the new endpoint from story fields
+        for method, path in detected_endpoints:
+            sentences.append(f"A new {method} {path} endpoint is being introduced.")
+        if purpose:
+            sentences.append(f"Purpose: {purpose}")
+        if consumers:
+            sentences.append(f"Intended consumers: {consumers}")
+        if change_type:
+            sentences.append(f"Change type indicated in story: {change_type}")
+        if not sentences:
+            sentences.append(f"New API design from story: {story_summary}")
+        return sentences
+
+    for diff in diffs:
+        method = diff["method"]
+        path   = diff["path"]
+        status = diff["status"]
+
+        if status == "new":
+            sentences.append(
+                f"A brand-new {method} {path} endpoint is added — no existing consumers are affected."
+            )
+            if purpose:
+                sentences.append(f"Purpose: {purpose}")
+
+        elif status == "unchanged":
+            sentences.append(f"{method} {path} has no schema changes.")
+
+        else:
+            breaking = diff.get("breaking", [])
+            additive = diff.get("additive", [])
+
+            if breaking:
+                sentences.append(
+                    f"{method} {path} has {len(breaking)} breaking change(s) that will affect existing consumers:"
+                )
+                for msg in breaking:
+                    sentences.append(f"  • {msg}")
+
+            if additive:
+                sentences.append(
+                    f"{method} {path} has {len(additive)} backward-compatible addition(s):"
+                )
+                for msg in additive:
+                    sentences.append(f"  • {msg}")
+
+            sc = diff.get("summary_change")
+            if sc:
+                sentences.append(
+                    f"The endpoint description changed from \"{sc['before']}\" to \"{sc['after']}\"."
+                )
+
+    if consumers:
+        sentences.append(f"Known consumers of this API: {consumers}")
+
+    return sentences
+
+
 def build_comment_body(
     issue_key: str,
     summary: str,
@@ -931,6 +1005,12 @@ def build_comment_body(
     content: list[dict] = [
         _adf_heading("🤖 Auto-generated OpenAPI Change Report", level=2),
     ]
+
+    # ── Plain-English summary ──────────────────────────────────────────────────
+    plain = _plain_english_summary(summary, diffs, detected_endpoints, fields_raw)
+    if plain:
+        content.append(_adf_heading("What changed", level=3))
+        content.append(_adf_bullet(plain))
 
     # ── Per-endpoint verdict ───────────────────────────────────────────────────
     for diff in diffs:
