@@ -1272,9 +1272,14 @@ def main() -> None:
             new_spec["paths"].setdefault(path, {})[method.lower()] = op
 
     # ── Existing spec comparison ──────────────────────────────────────────────
+    _DEFAULT_EXISTING_SPEC = (
+        "https://raw.githubusercontent.com/EdytaLys/api-spec-task-manager"
+        "/main/specs/task-manager-openapi.yaml"
+    )
     existing_spec_url = (
         args.existing_spec
         or fields_raw.get("API Existing Contract", "")
+        or _DEFAULT_EXISTING_SPEC
     )
     existing_spec = fetch_existing_spec(existing_spec_url) if existing_spec_url else None
 
