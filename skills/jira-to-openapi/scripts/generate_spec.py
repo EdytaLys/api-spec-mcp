@@ -1271,23 +1271,19 @@ def main() -> None:
 
     # ── Create subtask in JIRA ────────────────────────────────────────────────
     if args.create_subtask:
-        if not diffs:
-            print("  ℹ  No diff available — skipping subtask (run with --existing-spec to enable).",
-                  file=sys.stderr)
+        print(f"\n  Creating subtask under {key} …", file=sys.stderr)
+        description_body = build_comment_body(
+            key, summary, diffs, merged_spec,
+            endpoint_content, detected_endpoints, fields_raw,
+        )
+        subtask_url = create_subtask_in_jira(
+            key, diffs, description_body,
+            project_key=args.project,
+        )
+        if subtask_url:
+            print(f"  ✓ Subtask created: {subtask_url}", file=sys.stderr)
         else:
-            print(f"\n  Creating subtask under {key} …", file=sys.stderr)
-            description_body = build_comment_body(
-                key, summary, diffs, merged_spec,
-                endpoint_content, detected_endpoints, fields_raw,
-            )
-            subtask_url = create_subtask_in_jira(
-                key, diffs, description_body,
-                project_key=args.project,
-            )
-            if subtask_url:
-                print(f"  ✓ Subtask created: {subtask_url}", file=sys.stderr)
-            else:
-                print("  ⚠  Subtask creation failed.", file=sys.stderr)
+            print("  ⚠  Subtask creation failed.", file=sys.stderr)
 
 
 if __name__ == "__main__":
