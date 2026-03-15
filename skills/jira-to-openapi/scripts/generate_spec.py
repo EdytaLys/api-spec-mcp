@@ -47,22 +47,6 @@ CONFIG = {
     "github_token": os.environ.get("GITHUB_TOKEN", ""),
 }
 
-_FIELD_CONFIG_CANDIDATES = [
-    Path("scripts/jira_field_config.json"),
-    Path(__file__).parent.parent.parent / "scripts/jira_field_config.json",
-    Path(__file__).parent / "jira_field_config.json",
-]
-
-FIELD_CONFIG_MAP = {
-    "API Purpose":           "apiPurpose",
-    "API HTTP Method":       "apiHttpMethod",
-    "API Request Fields":    "apiRequestFields",
-    "API Validation Rules":  "apiValidationRules",
-    "API Consumers":         "apiConsumers",
-    "API Error Scenarios":   "apiErrorScenarios",
-    "API Existing Contract": "apiExistingContract",
-    "API Change Type":       "apiChangeType",
-}
 
 TYPE_MAP = {
     "integer": ("integer", None),   "int":      ("integer", None),
@@ -97,27 +81,6 @@ def fetch_issue(issue_key: str) -> dict:
     r.raise_for_status()
     return r.json()
 
-def fetch_all_fields() -> dict[str, str]:
-    r = _jira_session().get(f"{CONFIG['base_url']}/rest/api/3/field")
-    r.raise_for_status()
-    return {f["name"]: f["id"] for f in r.json()}
-
-# ─── FIELD ID RESOLUTION ─────────────────────────────────────────────────────
-def load_field_ids() -> dict[str, str]:
-    for candidate in _FIELD_CONFIG_CANDIDATES:
-        if candidate.exists():
-            with open(candidate) as f:
-                cfg = json.load(f)
-            custom = cfg.get("customFields", {})
-            ids = {
-                name: custom[key]
-                for name, key in FIELD_CONFIG_MAP.items()
-                if key in custom and "XXXXX" not in custom.get(key, "XXXXX")
-            }
-            if len(ids) >= 6:
-                return ids
-    live = fetch_all_fields()
-    return {name: live[name] for name in FIELD_CONFIG_MAP if name in live}
 
 # ─── ADF → PLAIN TEXT ────────────────────────────────────────────────────────
 def adf_to_text(node) -> str:
@@ -318,6 +281,99 @@ _ENDPOINT_RE = re.compile(
     r"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[^\s,\n]+)", re.IGNORECASE
 )
 
+def parse_query_params(rc_text: str) -> list[dict]:
+    """
+    Parse query parameter definitions from required_changes text.
+
+    Recognises lines like:
+      Add query params: page (default 0), size (default 20, max 100), sort (e.g. createdAt,desc)
+
+    Returns a list of OpenAPI parameter objects ready to embed under operation["parameters"].
+    """
+    params: list[dict] = []
+    qp_match = re.search(
+        r"(?:add\s+)?query\s+params?(?:\s*:)?\s*(.+?)(?:\n|$)",
+        rc_text, re.IGNORECASE,
+    )
+    if not qp_match:
+        return params
+
+    param_text = qp_match.group(1)
+    for m in re.finditer(r"(\w+)\s*(?:\(([^)]*)\))?", param_text):
+        name = m.group(1)
+        if name.lower() in ("add", "query", "param", "params", "parameter", "parameters"):
+            continue
+        attrs_raw = m.group(2) or ""
+
+        if name in ("page", "size", "limit", "offset", "count", "pageSize", "pageNumber"):
+            schema: dict = {"type": "integer"}
+        else:
+            schema = {"type": "string"}
+
+        default_m = re.search(r"default\s+(\S+?)(?:[,)]|\s|$)", attrs_raw, re.IGNORECASE)
+        if default_m:
+            val = default_m.group(1).rstrip(",)")
+            try:
+                schema["default"] = int(val)
+            except ValueError:
+                schema["default"] = val
+
+        max_m = re.search(r"max\s+(\d+)", attrs_raw, re.IGNORECASE)
+        if max_m:
+            schema["maximum"] = int(max_m.group(1))
+
+        param: dict = {"name": name, "in": "query", "required": False, "schema": schema}
+
+        example_m = re.search(r"e\.g\.?\s*([^)]+)", attrs_raw, re.IGNORECASE)
+        if example_m:
+            param["example"] = example_m.group(1).strip().rstrip(")")
+
+        params.append(param)
+    return params
+
+
+def parse_response_envelope(rc_text: str, res: str) -> tuple[str, dict] | None:
+    """
+    Detect response envelope wrapping instructions like:
+      Wrap response in Page<Task> envelope: { content, totalElements, totalPages, number, size }
+
+    Returns (schema_name, schema_dict) referencing the existing <Res>Response schema,
+    or None if no wrapping instruction is found.
+    """
+    m = re.search(
+        r"wrap\s+response\s+in\s+([\w<>]+)\s+envelope\s*:\s*\{([^}]+)\}",
+        rc_text, re.IGNORECASE,
+    )
+    if not m:
+        return None
+
+    # Derive a valid schema name: Page<Task> → PageTask
+    raw_name = re.sub(r"[<>]", "", m.group(1))
+    schema_name = raw_name if raw_name else f"Paged{res}"
+
+    fields_text = m.group(2)
+    properties: dict = {}
+    for field in re.split(r"[,\s]+", fields_text):
+        field = field.strip()
+        if not field:
+            continue
+        if field == "content":
+            properties["content"] = {
+                "type": "array",
+                "items": {"$ref": f"#/components/schemas/{res}Response"},
+            }
+        elif field in ("totalElements", "totalPages", "number", "size", "page",
+                       "totalItems", "currentPage", "pageSize", "pageCount",
+                       "numberOfElements", "totalRecords"):
+            properties[field] = {"type": "integer"}
+        elif field in ("first", "last", "empty", "hasNext", "hasPrevious"):
+            properties[field] = {"type": "boolean"}
+        else:
+            properties[field] = {"type": "string"}
+
+    return schema_name, {"type": "object", "properties": properties}
+
+
 def parse_endpoints_from_text(text: str) -> list[tuple[str, str]]:
     """
     Extract (METHOD, /path) pairs from free-text blocks such as:
@@ -498,6 +554,18 @@ def build_operation(
         if code not in responses:
             responses[code] = {"description": desc}
 
+    # ── Query parameters from required_changes ────────────────────────────────
+    query_params = parse_query_params(required_changes)
+
+    # ── Response envelope (e.g. pagination wrapper) ───────────────────────────
+    envelope = parse_response_envelope(required_changes, res)
+    if envelope:
+        env_name, env_schema = envelope
+        schemas[env_name] = env_schema
+        responses[success_code]["content"]["application/json"]["schema"] = {
+            "$ref": f"#/components/schemas/{env_name}"
+        }
+
     operation: dict = {
         "summary":     summary,
         "description": op_desc or summary,
@@ -505,6 +573,9 @@ def build_operation(
         "tags":        [res],
         "responses":   responses,
     }
+
+    if query_params:
+        operation["parameters"] = query_params
 
     if method in BODY_METHODS and properties:
         req_schema_name = f"{res}{method.title()}Request"
@@ -913,6 +984,80 @@ def _extract_operation_yaml(spec_yaml: str, method: str) -> str:
     return "\n".join(lines)
 
 
+def _plain_english_summary(
+    story_summary: str,
+    diffs: list[dict],
+    detected_endpoints: list[tuple[str, str]],
+    fields_raw: dict[str, str],
+) -> list[str]:
+    """
+    Return a list of plain-English sentences describing what changed in the API.
+    Each item becomes a separate bullet in the 'What changed' section.
+    """
+    purpose     = fields_raw.get("API Purpose", "").strip()
+    consumers   = fields_raw.get("API Consumers", "").strip()
+    change_type = fields_raw.get("API Change Type", "").strip()
+    sentences: list[str] = []
+
+    if not diffs:
+        # No existing spec to diff against — describe the new endpoint from story fields
+        for method, path in detected_endpoints:
+            sentences.append(f"A new {method} {path} endpoint is being introduced.")
+        if purpose:
+            sentences.append(f"Purpose: {purpose}")
+        if consumers:
+            sentences.append(f"Intended consumers: {consumers}")
+        if change_type:
+            sentences.append(f"Change type indicated in story: {change_type}")
+        if not sentences:
+            sentences.append(f"New API design from story: {story_summary}")
+        return sentences
+
+    for diff in diffs:
+        method = diff["method"]
+        path   = diff["path"]
+        status = diff["status"]
+
+        if status == "new":
+            sentences.append(
+                f"A brand-new {method} {path} endpoint is added — no existing consumers are affected."
+            )
+            if purpose:
+                sentences.append(f"Purpose: {purpose}")
+
+        elif status == "unchanged":
+            sentences.append(f"{method} {path} has no schema changes.")
+
+        else:
+            breaking = diff.get("breaking", [])
+            additive = diff.get("additive", [])
+
+            if breaking:
+                sentences.append(
+                    f"{method} {path} has {len(breaking)} breaking change(s) that will affect existing consumers:"
+                )
+                for msg in breaking:
+                    sentences.append(f"  • {msg}")
+
+            if additive:
+                sentences.append(
+                    f"{method} {path} has {len(additive)} backward-compatible addition(s):"
+                )
+                for msg in additive:
+                    sentences.append(f"  • {msg}")
+
+            sc = diff.get("summary_change")
+            if sc:
+                sentences.append(
+                    f"The endpoint description changed from \"{sc['before']}\" to \"{sc['after']}\"."
+                )
+
+    if consumers:
+        sentences.append(f"Known consumers of this API: {consumers}")
+
+    return sentences
+
+
 def build_comment_body(
     issue_key: str,
     summary: str,
@@ -931,6 +1076,12 @@ def build_comment_body(
     content: list[dict] = [
         _adf_heading("🤖 Auto-generated OpenAPI Change Report", level=2),
     ]
+
+    # ── Plain-English summary ──────────────────────────────────────────────────
+    plain = _plain_english_summary(summary, diffs, detected_endpoints, fields_raw)
+    if plain:
+        content.append(_adf_heading("What changed", level=3))
+        content.append(_adf_bullet(plain))
 
     # ── Per-endpoint verdict ───────────────────────────────────────────────────
     for diff in diffs:
@@ -1021,14 +1172,13 @@ def create_subtask_in_jira(
     all_breaking = [m for d in diffs for m in d["breaking"]]
     endpoints    = ", ".join(f"{d['method']} {d['path']}" for d in diffs)
 
-    if all_breaking:
-        prefix  = "⚠️ Breaking changes"
+    if not diffs:
+        summary = f"OpenAPI spec review: {parent_key} — generated spec"
+    elif all_breaking:
         summary = f"OpenAPI spec review: {endpoints} — breaking changes detected"
     elif any(d["additive"] for d in diffs):
-        prefix  = "✅ Additive changes"
         summary = f"OpenAPI spec review: {endpoints} — additive changes, update spec"
     else:
-        prefix  = "✔ No changes"
         summary = f"OpenAPI spec review: {endpoints} — no schema changes"
 
     body = {
@@ -1093,8 +1243,10 @@ def main() -> None:
     )
     parser.add_argument("--report-only", action="store_true",
         help="Print the change report only; do not write the spec file.")
-    parser.add_argument("--create-subtask", action="store_true",
-        help="Create a Subtask under the JIRA issue containing the change report and generated spec.")
+    parser.add_argument("--create-subtask", action="store_true", default=True,
+        help="Create a Subtask under the JIRA issue with the change report and generated spec (default: on).")
+    parser.add_argument("--no-subtask", dest="create_subtask", action="store_false",
+        help="Skip subtask creation.")
     parser.add_argument("--project", default="SCRUM",
         help="JIRA project key used when creating the subtask (default: SCRUM).")
     args = parser.parse_args()
@@ -1105,35 +1257,22 @@ def main() -> None:
         sys.exit("⛔  Set JIRA_BASE_URL, JIRA_EMAIL, and JIRA_API_TOKEN env vars.")
 
     print(f"\nFetching {key} from {CONFIG['base_url']} …", file=sys.stderr)
-    field_ids = load_field_ids()
 
     issue   = fetch_issue(key)
     summary = issue["fields"].get("summary", key)
     raw     = issue["fields"]
     print(f"  Summary : {summary}", file=sys.stderr)
 
-    # 1. Extract custom field values (may all be empty for stories using the
-    #    free-text description template rather than structured custom fields)
-    fields_raw: dict[str, str] = {}
-    if field_ids:
-        for name, fid in field_ids.items():
-            fields_raw[name] = extract_value(raw.get(fid))
-            status = "✓" if fields_raw[name] else "○ (empty)"
-            print(f"  {status}  {name}", file=sys.stderr)
-    else:
-        print("  ⚠  No custom field IDs — falling back to description sections only",
-              file=sys.stderr)
-
-    # 2. Parse description sections and overlay any values that custom fields
-    #    left empty.  Description wins for fields it has content for.
+    # Extract all fields from the description sections
     desc_adf = raw.get("description")
     desc_fields = extract_fields_from_description(desc_adf)
 
+    fields_raw: dict[str, str] = {}
     for key_name, value in desc_fields.items():
-        if value and (not fields_raw.get(key_name) or key_name.startswith("_")):
+        if value:
             fields_raw[key_name] = value
             if not key_name.startswith("_"):
-                print(f"  ✓  {key_name} (from description)", file=sys.stderr)
+                print(f"  ✓  {key_name}", file=sys.stderr)
 
     # 3. Detect NEW endpoints only — restrict search to safe sources so that
     #    references to existing endpoints ("Keep PUT …", "existing GET …") in
@@ -1191,9 +1330,14 @@ def main() -> None:
             new_spec["paths"].setdefault(path, {})[method.lower()] = op
 
     # ── Existing spec comparison ──────────────────────────────────────────────
+    _DEFAULT_EXISTING_SPEC = (
+        "https://raw.githubusercontent.com/EdytaLys/api-spec-task-manager"
+        "/main/specs/task-manager-openapi.yaml"
+    )
     existing_spec_url = (
         args.existing_spec
         or fields_raw.get("API Existing Contract", "")
+        or _DEFAULT_EXISTING_SPEC
     )
     existing_spec = fetch_existing_spec(existing_spec_url) if existing_spec_url else None
 
