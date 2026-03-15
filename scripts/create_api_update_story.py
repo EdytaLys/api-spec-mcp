@@ -1,571 +1,578 @@
 #!/usr/bin/env python3
 """
-Script to create JIRA user stories for API requests with minimal PO input.
-Supports both NEW API creation and EXISTING API updates.
+create_api_update_story.py
+==========================
+PO-friendly script to create a Jira Story for an API update (new endpoint or
+modification to an existing one).
+
+The PO fills in a minimal YAML requirements file (see requirements_example.yaml)
+and runs this script.  All 8 API-First custom fields are populated automatically.
 
 Usage:
-    export JIRA_EMAIL="your-email@example.com"
-    export JIRA_API_TOKEN="your-api-token"
-    python create_api_update_story.py
+  python create_api_update_story.py                               # prompts for a YAML file
+  python create_api_update_story.py --from-file requirements.yaml # pass file directly
+  python create_api_update_story.py --dry-run                     # preview without creating
 
-Get your API token at: https://id.atlassian.com/manage-profile/security/api-tokens
+Environment variables (required unless editing CONFIG below):
+  JIRA_BASE_URL   e.g. https://acme.atlassian.net
+  JIRA_EMAIL      your Jira login email
+  JIRA_API_TOKEN  Personal Access Token
+  JIRA_PROJECT    project key (default: SCRUM)
 """
 
-import os
-import sys
-import json
-import base64
-import urllib.request
-import urllib.error
+import os, sys, json, argparse, textwrap
+from pathlib import Path
 
-JIRA_BASE_URL = "https://playground-best-team.atlassian.net"
-PROJECT_KEY = "SCRUM"
+try:
+    import yaml
+except ImportError:
+    sys.exit("Missing dependency: pip install pyyaml requests")
+
+try:
+    import requests
+    from requests.auth import HTTPBasicAuth
+except ImportError:
+    sys.exit("Missing dependency: pip install pyyaml requests")
+
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
+CONFIG = {
+    "base_url":    os.environ.get("JIRA_BASE_URL",    "https://your-domain.atlassian.net"),
+    "email":       os.environ.get("JIRA_EMAIL",       "admin@yourcompany.com"),
+    "token":       os.environ.get("JIRA_API_TOKEN",   "YOUR_API_TOKEN_HERE"),
+    "project_key": os.environ.get("JIRA_PROJECT",     "SCRUM"),
+}
+
+# Field IDs (read from jira_field_config.json automatically)
+FIELD_IDS: dict[str, str] = {}
+
+# ─── HTTP HELPERS ─────────────────────────────────────────────────────────────
+def _session():
+    s = requests.Session()
+    s.auth = HTTPBasicAuth(CONFIG["email"], CONFIG["token"])
+    s.headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+    return s
+
+S:   requests.Session = None   # initialised in main()
+BASE = ""
 
 
-def get_new_api_template(endpoint, purpose, http_method="POST", fields=None, validation_rules=None, error_scenarios=None):
-    """Template for creating a new API endpoint"""
-    fields = fields or []
-    validation_rules = validation_rules or []
-    error_scenarios = error_scenarios or []
-    
-    content = [
-        {
-            "type": "paragraph",
-            "content": [{"type": "text", "text": f"As a developer, I want {endpoint} so that {purpose}"}]
-        },
-        {
-            "type": "heading",
-            "attrs": {"level": 3},
-            "content": [{"type": "text", "text": "New endpoints to create"}]
-        },
-        {
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": f"{http_method} {endpoint}"}]}]},
-            ]
-        },
-    ]
-    
-    # Always add fields section with examples if empty
-    content.append({
-        "type": "heading",
-        "attrs": {"level": 3},
-        "content": [{"type": "text", "text": "Request fields"}]
-    })
-    
-    if fields:
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": field}]}]}
-                for field in fields
-            ]
-        })
-    else:
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "📝 Please specify request fields in the format: fieldName, type, required/optional", "marks": [{"type": "em"}]}]
-        })
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "Examples:", "marks": [{"type": "strong"}]}]
-        })
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "email, string, required"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "age, integer, optional"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "status, enum (ACTIVE/INACTIVE), required"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "price, number, required"}]}]},
-            ]
-        })
-    
-    # Always add validation rules section with examples if empty
-    content.append({
-        "type": "heading",
-        "attrs": {"level": 3},
-        "content": [{"type": "text", "text": "Validation rules"}]
-    })
-    
-    if validation_rules:
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": rule}]}]}
-                for rule in validation_rules
-            ]
-        })
-    else:
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "📝 Please specify business validation rules in plain English", "marks": [{"type": "em"}]}]
-        })
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "Examples:", "marks": [{"type": "strong"}]}]
-        })
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Email must be valid format and unique in the system"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Age must be between 18 and 100"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Title must be unique within the project"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Password must be at least 8 characters with uppercase, lowercase, and number"}]}]},
-            ]
-        })
-    
-    # Always add error scenarios section with examples if empty
-    content.append({
-        "type": "heading",
-        "attrs": {"level": 3},
-        "content": [{"type": "text", "text": "Error scenarios"}]
-    })
-    
-    if error_scenarios:
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": error}]}]}
-                for error in error_scenarios
-            ]
-        })
-    else:
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "📝 Please specify expected error cases with HTTP status codes", "marks": [{"type": "em"}]}]
-        })
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "Examples:", "marks": [{"type": "strong"}]}]
-        })
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "400 - Invalid email format"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "404 - Resource not found"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "409 - Email already registered"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "422 - Validation failed"}]}]},
-            ]
-        })
-    
-    # Add acceptance criteria
-    content.append({
-        "type": "heading",
-        "attrs": {"level": 3},
-        "content": [{"type": "text", "text": "Acceptance criteria"}]
-    })
-    
-    acceptance_criteria = [
-        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Endpoint accepts valid request and returns appropriate response"}]}]},
-        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "All mandatory fields are validated"}]}]},
-        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "All validation rules are enforced with clear error messages"}]}]},
-        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "All error scenarios return appropriate HTTP status codes and messages"}]}]},
-        {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Auto-generated OpenAPI spec documents the endpoint with correct schemas"}]}]},
-    ]
-    
-    content.append({
-        "type": "bulletList",
-        "content": acceptance_criteria
-    })
-    
+def _get(path: str, **kw) -> dict:
+    r = S.get(f"{BASE}{path}", **kw)
+    r.raise_for_status()
+    return r.json()
+
+
+def _post(path: str, body: dict) -> dict | None:
+    r = S.post(f"{BASE}{path}", json=body)
+    if r.status_code not in (200, 201):
+        print(f"  ⚠  POST {path} → {r.status_code}: {r.text[:400]}")
+        return None
+    return r.json()
+
+
+def _post_with_screen_retry(path: str, body: dict) -> tuple[dict | None, list[str]]:
+    """POST an issue, dropping fields not on the project screen. Returns (result, skipped_ids)."""
+    skipped: list[str] = []
+    fields = dict(body.get("fields", {}))
+
+    for _ in range(10):
+        r = S.post(f"{BASE}{path}", json={"fields": fields})
+        if r.status_code in (200, 201):
+            return r.json(), skipped
+        try:
+            err = r.json()
+        except Exception:
+            print(f"  ⚠  {r.status_code}: {r.text[:400]}")
+            return None, skipped
+
+        blocked = [
+            fid for fid, msg in err.get("errors", {}).items()
+            if "not on the appropriate screen" in msg or "cannot be set" in msg
+        ]
+        if not blocked:
+            print(f"  ⚠  {r.status_code}: {r.text[:400]}")
+            return None, skipped
+        for fid in blocked:
+            print(f"  ⚠  {fid} blocked by screen — will post as comment")
+            skipped.append(fid)
+            fields.pop(fid, None)
+
+    return None, skipped
+
+
+# ─── FIELD ID RESOLUTION ──────────────────────────────────────────────────────
+_CFG_KEY_MAP = {
+    "API Purpose":           "apiPurpose",
+    "API HTTP Method":       "apiHttpMethod",
+    "API Request Fields":    "apiRequestFields",
+    "API Validation Rules":  "apiValidationRules",
+    "API Consumers":         "apiConsumers",
+    "API Error Scenarios":   "apiErrorScenarios",
+    "API Existing Contract": "apiExistingContract",
+    "API Change Type":       "apiChangeType",
+}
+
+def load_field_ids() -> dict[str, str]:
+    config_path = Path(__file__).parent / "jira_field_config.json"
+    if config_path.exists():
+        with open(config_path) as f:
+            cfg = json.load(f)
+        custom = cfg.get("customFields", {})
+        ids = {
+            name: custom[key]
+            for name, key in _CFG_KEY_MAP.items()
+            if custom.get(key) and "XXXXX" not in custom.get(key, "")
+        }
+        if len(ids) == len(_CFG_KEY_MAP):
+            return ids
+        print(f"  ⚠  {config_path.name} has placeholder IDs — querying Jira live …")
+
+    all_fields = _get("/rest/api/3/field")
+    return {f["name"]: f["id"] for f in all_fields if f["name"] in _CFG_KEY_MAP}
+
+
+def _select_option(field_id: str, value: str) -> dict | None:
+    try:
+        ctx_resp = _get(f"/rest/api/3/field/{field_id}/context")
+        ctxs = ctx_resp.get("values", [])
+        if not ctxs:
+            return None
+        opts = _get(
+            f"/rest/api/3/field/{field_id}/context/{ctxs[0]['id']}/option",
+            params={"maxResults": 50},
+        )
+        for opt in opts.get("values", []):
+            if opt["value"] == value:
+                return {"id": opt["id"]}
+    except Exception:
+        pass
+    return None
+
+
+# ─── ADF HELPERS ──────────────────────────────────────────────────────────────
+def _para(*texts: str) -> dict:
+    return {"type": "paragraph",
+            "content": [{"type": "text", "text": t} for t in texts]}
+
+def _heading(text: str, level: int = 2) -> dict:
+    return {"type": "heading", "attrs": {"level": level},
+            "content": [{"type": "text", "text": text}]}
+
+def _bullet(items: list[str]) -> dict:
     return {
-        "summary": f"Create {endpoint} endpoint",
-        "story_type": "new_api",
-        "description": {
-            "version": 1,
-            "type": "doc",
-            "content": content
-        },
-        "labels": ["new-api", "api-spec"],
-        "story_points": 5,
-    }
-
-
-def get_update_api_template(endpoint, changes, acceptance_criteria, fields=None, validation_rules=None, error_scenarios=None):
-    """Template for updating an existing API endpoint"""
-    fields = fields or []
-    validation_rules = validation_rules or []
-    error_scenarios = error_scenarios or []
-    
-    content = [
-        {
-            "type": "paragraph",
-            "content": [{"type": "text", "text": f"As a developer, I want to update {endpoint} to improve functionality and meet new requirements."}]
-        },
-        {
-            "type": "heading",
-            "attrs": {"level": 3},
-            "content": [{"type": "text", "text": "Existing endpoint"}]
-        },
-        {
-            "type": "paragraph",
-            "content": [{"type": "text", "text": endpoint}]
-        },
-        {
-            "type": "heading",
-            "attrs": {"level": 3},
-            "content": [{"type": "text", "text": "Required changes"}]
-        },
-        {
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": change}]}]}
-                for change in changes
-            ]
-        },
-    ]
-    
-    # Always add fields section with examples if empty
-    content.append({
-        "type": "heading",
-        "attrs": {"level": 3},
-        "content": [{"type": "text", "text": "Request fields"}]
-    })
-    
-    if fields:
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": field}]}]}
-                for field in fields
-            ]
-        })
-    else:
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "📝 Please specify updated or new request fields in the format: fieldName, type, required/optional", "marks": [{"type": "em"}]}]
-        })
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "Examples:", "marks": [{"type": "strong"}]}]
-        })
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "title, string, optional (for PATCH endpoints)"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "status, enum (TODO/IN_PROGRESS/DONE), optional"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "priority, enum (LOW/MEDIUM/HIGH), required"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "dueDate, date, optional"}]}]},
-            ]
-        })
-    
-    # Always add validation rules section with examples if empty
-    content.append({
-        "type": "heading",
-        "attrs": {"level": 3},
-        "content": [{"type": "text", "text": "Validation rules"}]
-    })
-    
-    if validation_rules:
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": rule}]}]}
-                for rule in validation_rules
-            ]
-        })
-    else:
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "📝 Please specify business validation rules in plain English", "marks": [{"type": "em"}]}]
-        })
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "Examples:", "marks": [{"type": "strong"}]}]
-        })
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Title must be unique within the project if provided"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Status must be one of the valid enum values"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "Due date must be in the future if provided"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "At least one field must be present in PATCH request"}]}]},
-            ]
-        })
-    
-    # Always add error scenarios section with examples if empty
-    content.append({
-        "type": "heading",
-        "attrs": {"level": 3},
-        "content": [{"type": "text", "text": "Error scenarios"}]
-    })
-    
-    if error_scenarios:
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": error}]}]}
-                for error in error_scenarios
-            ]
-        })
-    else:
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "📝 Please specify expected error cases with HTTP status codes", "marks": [{"type": "em"}]}]
-        })
-        content.append({
-            "type": "paragraph",
-            "content": [{"type": "text", "text": "Examples:", "marks": [{"type": "strong"}]}]
-        })
-        content.append({
-            "type": "bulletList",
-            "content": [
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "400 - Invalid field value"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "404 - Resource not found"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "409 - Conflict with existing data"}]}]},
-                {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": "422 - Validation failed"}]}]},
-            ]
-        })
-    
-    # Add acceptance criteria
-    content.append({
-        "type": "heading",
-        "attrs": {"level": 3},
-        "content": [{"type": "text", "text": "Acceptance criteria"}]
-    })
-    content.append({
         "type": "bulletList",
         "content": [
-            {"type": "listItem", "content": [{"type": "paragraph", "content": [{"type": "text", "text": criterion}]}]}
-            for criterion in acceptance_criteria
-        ]
-    })
-    
+            {"type": "listItem",
+             "content": [_para(item)]}
+            for item in items
+        ],
+    }
+
+def _task_list(items: list[str]) -> dict:
+    """ADF task list (checkboxes) for acceptance criteria."""
     return {
-        "summary": f"Update {endpoint}",
-        "story_type": "update_existing_api",
-        "description": {
-            "version": 1,
-            "type": "doc",
-            "content": content
-        },
-        "labels": ["update-existing-api", "api-spec"],
-        "story_points": 3,
+        "type": "taskList",
+        "attrs": {"localId": "ac-list"},
+        "content": [
+            {
+                "type": "taskItem",
+                "attrs": {"localId": f"ac-{i}", "state": "TODO"},
+                "content": [{"type": "text", "text": item}],
+            }
+            for i, item in enumerate(items, 1)
+        ],
     }
 
-
-def build_auth_header(email: str, api_token: str) -> str:
-    credentials = f"{email}:{api_token}"
-    encoded = base64.b64encode(credentials.encode()).decode()
-    return f"Basic {encoded}"
-
-
-def create_issue(auth_header: str, story: dict) -> dict:
-    url = f"{JIRA_BASE_URL}/rest/api/3/issue"
-
-    payload = {
-        "fields": {
-            "project": {"key": PROJECT_KEY},
-            "summary": story["summary"],
-            "description": story["description"],
-            "issuetype": {"name": "Story"},
-            "labels": story.get("labels", []),
-        }
+def _code_block(text: str, language: str = "text") -> dict:
+    return {
+        "type": "codeBlock",
+        "attrs": {"language": language},
+        "content": [{"type": "text", "text": text}],
     }
 
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Authorization": auth_header,
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
-    )
-
-    with urllib.request.urlopen(req) as response:
-        return json.loads(response.read().decode())
+def _text_to_adf(text: str) -> dict:
+    """Plain multi-line string → ADF doc (one paragraph per line)."""
+    paras = [_para(line or " ") for line in text.splitlines()]
+    return {"version": 1, "type": "doc", "content": paras or [_para(" ")]}
 
 
-def collect_fields():
-    """Collect field information from PO"""
-    print("\nAPI FIELDS")
-    print("-" * 70)
-    print("For each field, provide: name, type, and whether it's required")
-    print("Example: email, string, required")
-    print("Example: age, integer, optional")
-    print("(Enter empty line when done)")
-    print()
-    
-    fields = []
-    i = 1
-    while True:
-        field_input = input(f"  Field {i}: ").strip()
-        if not field_input:
-            break
-        fields.append(field_input)
-        i += 1
-    
-    return fields
+# ─── REQUIREMENTS → JIRA FIELDS ───────────────────────────────────────────────
+def translate(req: dict) -> tuple[str, dict[str, str], dict]:
+    """
+    Map the PO requirements YAML to:
+      summary   — Jira issue summary
+      values    — {field_name: plain_text_value}  (for custom fields)
+      ac_items  — list[str] acceptance criteria lines (for description checklist)
+    """
+    endpoint  = req.get("endpoint", {})
+    method    = str(endpoint.get("method", "PATCH")).upper()
+    path      = endpoint.get("path", "/api/resource/{id}")
+    summary   = req.get("title") or f"{method} {path} — API update"
 
+    # ── API Purpose ─────────────────────────────────────────────────────────
+    purpose_lines = [endpoint.get("description", "").strip()]
+    keeping = req.get("keeps_endpoints", [])
+    if keeping:
+        purpose_lines.append(
+            "Existing endpoints kept (no breaking change): "
+            + ", ".join(keeping)
+        )
+    api_purpose = "\n".join(l for l in purpose_lines if l)
 
-def collect_validation_rules():
-    """Collect validation rules from PO"""
-    print("\nVALIDATION RULES")
-    print("-" * 70)
-    print("Describe business validation rules in plain English")
-    print("Example: Email must be valid format")
-    print("Example: Age must be between 18 and 100")
-    print("Example: Title must be unique within the project")
-    print("(Enter empty line when done)")
-    print()
-    
-    rules = []
-    i = 1
-    while True:
-        rule = input(f"  Rule {i}: ").strip()
-        if not rule:
-            break
-        rules.append(rule)
-        i += 1
-    
-    return rules
+    # ── API Request Fields ───────────────────────────────────────────────────
+    rf_lines = ["name | type | required | validation"]
+    for field in req.get("request_fields", []):
+        req_flag = "required" if field.get("required") else "optional"
+        rf_lines.append(
+            f"{field['name']} | {field.get('type','string')} | {req_flag} | {field.get('validation','')}"
+        )
+    api_request_fields = "\n".join(rf_lines)
 
+    # ── API Validation Rules ─────────────────────────────────────────────────
+    rules = req.get("business_rules", [])
+    api_validation_rules = "\n".join(f"- {r}" for r in rules) if rules else ""
 
-def collect_error_scenarios():
-    """Collect error scenarios and messages from PO"""
-    print("\nERROR SCENARIOS")
-    print("-" * 70)
-    print("Describe expected error cases with HTTP status codes")
-    print("Example: 400 - Invalid email format")
-    print("Example: 404 - Task not found")
-    print("Example: 409 - Title already exists")
-    print("(Enter empty line when done)")
-    print()
-    
-    errors = []
-    i = 1
-    while True:
-        error = input(f"  Error {i}: ").strip()
-        if not error:
-            break
-        errors.append(error)
-        i += 1
-    
-    return errors
+    # ── API Consumers ────────────────────────────────────────────────────────
+    consumers = req.get("consumers", [])
+    api_consumers = "\n".join(f"- {c}" for c in consumers) if consumers else ""
 
-
-def get_user_input():
-    """Interactive prompt to gather story details"""
-    print("=" * 70)
-    print(" JIRA API Story Generator")
-    print("=" * 70)
-    print()
-    
-    # Story type
-    print("What type of API story do you want to create?")
-    print("  1. New API endpoint")
-    print("  2. Update existing API endpoint")
-    print()
-    
-    while True:
-        choice = input("Enter choice (1 or 2): ").strip()
-        if choice in ["1", "2"]:
-            break
-        print("Invalid choice. Please enter 1 or 2.")
-    
-    story_type = "new" if choice == "1" else "update"
-    print()
-    
-    if story_type == "new":
-        # New API
-        print("NEW API ENDPOINT")
-        print("-" * 70)
-        endpoint = input("Endpoint path (e.g., /api/tasks): ").strip()
-        http_method = input("HTTP method (GET/POST/PUT/PATCH/DELETE) [POST]: ").strip().upper() or "POST"
-        purpose = input("Purpose (what does this API do?): ").strip()
-        
-        # Collect detailed requirements
-        fields = collect_fields()
-        validation_rules = collect_validation_rules()
-        error_scenarios = collect_error_scenarios()
-        
-        return get_new_api_template(endpoint, purpose, http_method, fields, validation_rules, error_scenarios)
-    
+    # ── API Error Scenarios ──────────────────────────────────────────────────
+    errors = req.get("error_scenarios", [])
+    if errors:
+        api_error_scenarios = "\n".join(f"- {e}" for e in errors)
     else:
-        # Update existing API
-        print("UPDATE EXISTING API")
-        print("-" * 70)
-        endpoint = input("Endpoint to update (e.g., PUT /api/tasks/{id}): ").strip()
-        
-        print("\nRequired changes (enter each change, empty line to finish):")
-        changes = []
-        i = 1
-        while True:
-            change = input(f"  {i}. ").strip()
-            if not change:
-                break
-            changes.append(change)
-            i += 1
-        
-        if not changes:
-            changes = ["Update endpoint implementation"]
-        
-        # Collect detailed requirements
-        print("\nDo you need to specify fields for this update? (y/N): ", end="")
-        if input().strip().lower() == 'y':
-            fields = collect_fields()
+        # Derive standard errors for the method
+        api_error_scenarios = _default_errors(method)
+
+    values = {
+        "API Purpose":           api_purpose,
+        "API HTTP Method":       method,
+        "API Request Fields":    api_request_fields,
+        "API Validation Rules":  api_validation_rules,
+        "API Consumers":         api_consumers,
+        "API Error Scenarios":   api_error_scenarios,
+        "API Existing Contract": req.get("existing_spec_url", ""),
+        "API Change Type":       req.get("change_type", "Additive"),
+    }
+
+    ac_items = req.get("acceptance_criteria", [])
+    return summary, values, ac_items
+
+
+def _default_errors(method: str) -> str:
+    lines = [
+        "200 — successful response" if method in ("GET", "PATCH") else "201 — created",
+        "400 — validation error / bad request",
+        "401 — unauthorized",
+    ]
+    if method in ("GET", "PATCH", "PUT", "DELETE"):
+        lines.append("404 — resource not found")
+    if method in ("POST", "PATCH", "PUT"):
+        lines.append("409 — conflict (e.g. duplicate unique field)")
+    lines.append("500 — internal server error")
+    return "\n".join(f"- {l}" for l in lines)
+
+
+# ─── DESCRIPTION BUILDER ──────────────────────────────────────────────────────
+def build_description(summary: str, ac_items: list[str], req: dict) -> dict:
+    endpoint = req.get("endpoint", {})
+    method   = str(endpoint.get("method", "PATCH")).upper()
+    path     = endpoint.get("path", "")
+
+    content = [
+        _heading("Context", level=2),
+        _para(endpoint.get("description", summary)),
+    ]
+
+    # Required changes block
+    changes = req.get("required_changes", [])
+    if changes:
+        content += [_heading("Required changes", level=2), _bullet(changes)]
+
+    # Request body example if provided
+    body_example = req.get("request_body_example")
+    if body_example:
+        content += [
+            _heading("Request body example", level=2),
+            _code_block(body_example, "json"),
+        ]
+
+    # Acceptance criteria as a task list
+    if ac_items:
+        content += [
+            _heading("Acceptance criteria", level=2),
+            _task_list(ac_items),
+        ]
+
+    # OpenAPI spec reminder
+    content += [
+        _heading("API-First checklist", level=2),
+        _bullet([
+            "All custom fields on this issue are filled in",
+            "Add label 'api-spec-required' to trigger spec workflow",
+            "Transition to Ready for Dev to start automation",
+            f"Auto-generated spec must list {method} {path} with correct schema",
+            "Spec uploaded to specs repo and PR reviewed before merge",
+        ]),
+    ]
+
+    return {"version": 1, "type": "doc", "content": content}
+
+
+# ─── ISSUE BUILDER ────────────────────────────────────────────────────────────
+def build_issue(
+    summary: str,
+    values: dict[str, str],
+    ac_items: list[str],
+    req: dict,
+    field_ids: dict[str, str],
+) -> dict:
+    fields: dict = {
+        "project":     {"key": CONFIG["project_key"]},
+        "issuetype":   {"name": "Story"},
+        "summary":     summary,
+        "description": build_description(summary, ac_items, req),
+        "labels":      ["api-spec-required"],
+    }
+
+    for name, fid in field_ids.items():
+        value = values.get(name, "")
+        if not value:
+            continue
+        if name in ("API HTTP Method", "API Change Type"):
+            opt = _select_option(fid, value)
+            if opt:
+                fields[fid] = opt
+            else:
+                print(f"  ⚠  Option '{value}' not found for {name} — field skipped")
+        elif name == "API Existing Contract":
+            fields[fid] = value        # plain string (URL)
         else:
-            fields = []
-        
-        validation_rules = collect_validation_rules()
-        error_scenarios = collect_error_scenarios()
-        
-        print("\nAcceptance criteria (enter each criterion, empty line to finish):")
-        criteria = []
-        i = 1
-        while True:
-            criterion = input(f"  {i}. ").strip()
-            if not criterion:
-                break
-            criteria.append(criterion)
-            i += 1
-        
-        if not criteria:
-            criteria = ["Updated endpoint works as expected", "Auto-generated OpenAPI spec reflects changes"]
-        
-        return get_update_api_template(endpoint, changes, criteria, fields, validation_rules, error_scenarios)
+            fields[fid] = _text_to_adf(value)   # ADF for textarea fields
+
+    return {"fields": fields}
 
 
-def main():
-    email = os.environ.get("JIRA_EMAIL")
-    api_token = os.environ.get("JIRA_API_TOKEN")
+# ─── DRY RUN PREVIEW ──────────────────────────────────────────────────────────
+def print_preview(summary: str, values: dict[str, str], ac_items: list[str]) -> None:
+    width = 70
+    print("\n" + "═" * width)
+    print("  DRY RUN PREVIEW — no issue will be created")
+    print("═" * width)
+    print(f"\n  SUMMARY : {summary}")
+    print(f"  PROJECT : {CONFIG['project_key']}\n")
+    print("  ── Custom fields ──────────────────────────────────────────")
+    for name, value in values.items():
+        if not value:
+            continue
+        label = f"  {name}:"
+        indent = " " * 4
+        body = textwrap.indent(value, indent)
+        print(f"{label}\n{body}")
+    if ac_items:
+        print("\n  ── Acceptance criteria (description checklist) ────────────")
+        for item in ac_items:
+            print(f"    ☐ {item}")
+    print("\n" + "═" * width + "\n")
 
-    if not email or not api_token:
-        print("ERROR: Set JIRA_EMAIL and JIRA_API_TOKEN environment variables.")
-        print("  export JIRA_EMAIL='your-email@example.com'")
-        print("  export JIRA_API_TOKEN='your-api-token'")
-        print("Get your token at: https://id.atlassian.com/manage-profile/security/api-tokens")
+
+# ─── REQUIREMENTS LOADER ──────────────────────────────────────────────────────
+def load_requirements(file_path: str) -> dict:
+    p = Path(file_path)
+    if not p.exists():
+        sys.exit(f"⛔  Requirements file not found: {p}")
+    with open(p) as f:
+        return yaml.safe_load(f)
+
+
+EXAMPLE_REQUIREMENTS = {
+    "title": "PATCH /api/tasks/{id} — Partial update (keep PUT for full-replacement)",
+    "endpoint": {
+        "method": "PATCH",
+        "path": "/api/tasks/{id}",
+        "description": (
+            "Add a partial-update endpoint for tasks. Only fields present in the "
+            "request body are updated. Passing null means 'no change', not 'clear field'. "
+            "PUT /api/tasks/{id} is kept for full-replacement with no breaking change."
+        ),
+    },
+    "keeps_endpoints": ["PUT /api/tasks/{id}"],
+    "required_changes": [
+        "Add PATCH /api/tasks/{id} accepting a partial TaskUpdateRequest",
+        "Only fields present in the request body are updated (null = no change, not clear)",
+        "Keep PUT /api/tasks/{id} for full-replacement semantics (no breaking change)",
+    ],
+    "request_fields": [
+        {"name": "title",       "type": "string",  "required": False, "validation": "max 255 chars; must be unique — 409 Conflict if duplicate"},
+        {"name": "description", "type": "string",  "required": False, "validation": "max 1000 chars"},
+        {"name": "status",      "type": "string",  "required": False, "validation": "enum: TODO | IN_PROGRESS | DONE"},
+        {"name": "dueDate",     "type": "string",  "required": False, "validation": "ISO 8601 date-time; must be in the future if provided"},
+    ],
+    "request_body_example": (
+        '// Update only status — all other fields unchanged\n'
+        '{ "status": "DONE" }\n\n'
+        '// Empty body — returns 200 with unchanged task\n'
+        '{}'
+    ),
+    "business_rules": [
+        "Only fields present in the request body are updated",
+        "null value means 'no change' — it does NOT clear the field",
+        "PATCH with an empty body {} returns 200 with the task unchanged",
+        "title must remain unique across all tasks (409 Conflict if duplicate)",
+        "updatedAt is refreshed on every successful PATCH",
+        "Cannot PATCH a task that does not exist (404)",
+    ],
+    "acceptance_criteria": [
+        'PATCH /api/tasks/{id} with { "status": "DONE" } updates only status; other fields unchanged',
+        "PATCH with empty body {} returns 200 with unchanged task",
+        "PATCH with title that already exists returns 409 Conflict",
+        "updatedAt is refreshed on every successful PATCH",
+        "Auto-generated OpenAPI spec lists PATCH separately from PUT with correct partial schema",
+    ],
+    "error_scenarios": [
+        "200 — successful partial update, returns updated task",
+        "400 — invalid field value (e.g. unknown status)",
+        "401 — unauthorized",
+        "404 — task not found",
+        "409 — title already exists (conflict)",
+        "500 — internal server error",
+    ],
+    "consumers": [
+        "Frontend React (Task Management UI)",
+        "Mobile clients (iOS / Android)",
+    ],
+    "existing_spec_url": "",   # paste GitHub/Confluence URL of current OpenAPI spec
+    "change_type": "Additive",
+}
+
+
+# ─── MAIN ─────────────────────────────────────────────────────────────────────
+def main() -> None:
+    global S, BASE
+
+    parser = argparse.ArgumentParser(
+        description="Create a Jira Story for an API update from a minimal requirements file.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--from-file", metavar="YAML",
+        help="Path to requirements YAML file (see --generate-example to create one)",
+    )
+    parser.add_argument(
+        "--generate-example", metavar="PATH",
+        help="Write an example requirements.yaml to PATH and exit",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Preview the Jira fields that would be set, without creating the issue",
+    )
+    args = parser.parse_args()
+
+    # ── Generate example file ────────────────────────────────────────────────
+    if args.generate_example:
+        out = Path(args.generate_example)
+        with open(out, "w") as f:
+            yaml.dump(EXAMPLE_REQUIREMENTS, f,
+                      default_flow_style=False, allow_unicode=True, sort_keys=False)
+        print(f"✓ Example requirements written to: {out}")
+        print(f"  Edit the file, then run:\n  python {Path(__file__).name} --from-file {out}")
+        sys.exit(0)
+
+    # ── Load requirements ────────────────────────────────────────────────────
+    if args.from_file:
+        req = load_requirements(args.from_file)
+    else:
+        print(
+            "\n  No --from-file specified — using built-in PATCH /api/tasks/{id} example.\n"
+            f"  To generate a blank template: python {Path(__file__).name} "
+            "--generate-example requirements.yaml\n"
+        )
+        req = EXAMPLE_REQUIREMENTS
+
+    summary, values, ac_items = translate(req)
+
+    # ── Dry run ──────────────────────────────────────────────────────────────
+    if args.dry_run:
+        print_preview(summary, values, ac_items)
+        print("  (dry-run — no issue created)")
+        return
+
+    # ── Validate config ──────────────────────────────────────────────────────
+    BASE = CONFIG["base_url"].rstrip("/")
+    if "your-domain" in BASE or "YOUR_API_TOKEN" in CONFIG["token"]:
+        print(
+            "\n⛔  JIRA credentials not configured. Set these env vars:\n"
+            "    export JIRA_BASE_URL=https://your-team.atlassian.net\n"
+            "    export JIRA_EMAIL=you@example.com\n"
+            "    export JIRA_API_TOKEN=<token>\n"
+            "    export JIRA_PROJECT=SCRUM   # optional, default: SCRUM\n"
+        )
         sys.exit(1)
 
-    auth_header = build_auth_header(email, api_token)
+    S = _session()
 
-    # Get story details from user
-    story_template = get_user_input()
-    
-    print()
-    print("=" * 70)
-    print(f"Creating story in JIRA project {PROJECT_KEY}...")
-    print(f"Summary: {story_template['summary']}")
-    print("=" * 70)
-    print()
-
+    # ── Test connection ──────────────────────────────────────────────────────
     try:
-        result = create_issue(auth_header, story_template)
-        issue_key = result.get("key", "???")
-        issue_url = f"{JIRA_BASE_URL}/browse/{issue_key}"
-        print(f"✓ Created: {issue_key}")
-        print(f"  URL: {issue_url}")
-        print(f"\n✓ Story created successfully!")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
-        print(f"✗ HTTP {e.code}: {body[:200]}")
+        me = _get("/rest/api/3/myself")
+        print(f"\n✓ Connected to {BASE} as {me.get('displayName', me.get('emailAddress', '?'))}")
+    except requests.HTTPError as e:
+        print(f"\n⛔  Connection failed: {e}")
         sys.exit(1)
-    except Exception as e:
-        print(f"✗ Error: {e}")
+
+    # ── Field IDs ────────────────────────────────────────────────────────────
+    print("\n── Resolving custom field IDs ───────────────────────────────────────")
+    field_ids = load_field_ids()
+    for name in _CFG_KEY_MAP:
+        status = f"({field_ids[name]})" if name in field_ids else "(NOT FOUND — skipping)"
+        print(f"  {'✓' if name in field_ids else '✗'}  {name:30s} {status}")
+
+    # ── Preview ──────────────────────────────────────────────────────────────
+    print_preview(summary, values, ac_items)
+
+    answer = input("  Create this Jira story? (Y/n): ").strip().lower()
+    if answer == "n":
+        print("  Cancelled.")
+        sys.exit(0)
+
+    # ── Create issue ─────────────────────────────────────────────────────────
+    issue_body   = build_issue(summary, values, ac_items, req, field_ids)
+    result, skipped_ids = _post_with_screen_retry("/rest/api/3/issue", issue_body)
+
+    if not result:
+        print("\n⛔  Failed to create issue.")
         sys.exit(1)
+
+    issue_key = result["key"]
+    issue_url = f"{BASE}/browse/{issue_key}"
+
+    # ── Post screen-blocked fields as a comment ───────────────────────────────
+    if skipped_ids:
+        id_to_name = {v: k for k, v in field_ids.items()}
+        lines = ["*Fields blocked by screen config — set these manually:*\n"]
+        for fid in skipped_ids:
+            name  = id_to_name.get(fid, fid)
+            value = values.get(name, "(see requirements)")
+            lines.append(f"*{name}*:\n{value}\n")
+        _post(
+            f"/rest/api/3/issue/{issue_key}/comment",
+            {"body": {"version": 1, "type": "doc", "content": [_para(l) for l in lines]}},
+        )
+        print(f"  ✓ Skipped field values posted as comment on {issue_key}")
+
+    # ── Summary ──────────────────────────────────────────────────────────────
+    print("\n" + "═" * 70)
+    print(f" ✓ Story created : {issue_key}")
+    print(f" URL             : {issue_url}")
+    print("═" * 70)
+    print(
+        "\n Next steps:\n"
+        f"  1. Open {issue_url} and verify the custom fields\n"
+        "  2. Add label 'api-spec-required' if not already present\n"
+        "  3. Transition to 'Ready for Dev' to trigger the spec workflow\n"
+        "  4. Run the repo-to-openapi skill to regenerate the implementation spec\n"
+        "  5. Compare against the jira-to-openapi spec for contract alignment\n"
+    )
+    print("═" * 70)
 
 
 if __name__ == "__main__":
