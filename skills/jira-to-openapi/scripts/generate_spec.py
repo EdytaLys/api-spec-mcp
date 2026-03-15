@@ -281,6 +281,99 @@ _ENDPOINT_RE = re.compile(
     r"(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[^\s,\n]+)", re.IGNORECASE
 )
 
+def parse_query_params(rc_text: str) -> list[dict]:
+    """
+    Parse query parameter definitions from required_changes text.
+
+    Recognises lines like:
+      Add query params: page (default 0), size (default 20, max 100), sort (e.g. createdAt,desc)
+
+    Returns a list of OpenAPI parameter objects ready to embed under operation["parameters"].
+    """
+    params: list[dict] = []
+    qp_match = re.search(
+        r"(?:add\s+)?query\s+params?(?:\s*:)?\s*(.+?)(?:\n|$)",
+        rc_text, re.IGNORECASE,
+    )
+    if not qp_match:
+        return params
+
+    param_text = qp_match.group(1)
+    for m in re.finditer(r"(\w+)\s*(?:\(([^)]*)\))?", param_text):
+        name = m.group(1)
+        if name.lower() in ("add", "query", "param", "params", "parameter", "parameters"):
+            continue
+        attrs_raw = m.group(2) or ""
+
+        if name in ("page", "size", "limit", "offset", "count", "pageSize", "pageNumber"):
+            schema: dict = {"type": "integer"}
+        else:
+            schema = {"type": "string"}
+
+        default_m = re.search(r"default\s+(\S+?)(?:[,)]|\s|$)", attrs_raw, re.IGNORECASE)
+        if default_m:
+            val = default_m.group(1).rstrip(",)")
+            try:
+                schema["default"] = int(val)
+            except ValueError:
+                schema["default"] = val
+
+        max_m = re.search(r"max\s+(\d+)", attrs_raw, re.IGNORECASE)
+        if max_m:
+            schema["maximum"] = int(max_m.group(1))
+
+        param: dict = {"name": name, "in": "query", "required": False, "schema": schema}
+
+        example_m = re.search(r"e\.g\.?\s*([^)]+)", attrs_raw, re.IGNORECASE)
+        if example_m:
+            param["example"] = example_m.group(1).strip().rstrip(")")
+
+        params.append(param)
+    return params
+
+
+def parse_response_envelope(rc_text: str, res: str) -> tuple[str, dict] | None:
+    """
+    Detect response envelope wrapping instructions like:
+      Wrap response in Page<Task> envelope: { content, totalElements, totalPages, number, size }
+
+    Returns (schema_name, schema_dict) referencing the existing <Res>Response schema,
+    or None if no wrapping instruction is found.
+    """
+    m = re.search(
+        r"wrap\s+response\s+in\s+([\w<>]+)\s+envelope\s*:\s*\{([^}]+)\}",
+        rc_text, re.IGNORECASE,
+    )
+    if not m:
+        return None
+
+    # Derive a valid schema name: Page<Task> → PageTask
+    raw_name = re.sub(r"[<>]", "", m.group(1))
+    schema_name = raw_name if raw_name else f"Paged{res}"
+
+    fields_text = m.group(2)
+    properties: dict = {}
+    for field in re.split(r"[,\s]+", fields_text):
+        field = field.strip()
+        if not field:
+            continue
+        if field == "content":
+            properties["content"] = {
+                "type": "array",
+                "items": {"$ref": f"#/components/schemas/{res}Response"},
+            }
+        elif field in ("totalElements", "totalPages", "number", "size", "page",
+                       "totalItems", "currentPage", "pageSize", "pageCount",
+                       "numberOfElements", "totalRecords"):
+            properties[field] = {"type": "integer"}
+        elif field in ("first", "last", "empty", "hasNext", "hasPrevious"):
+            properties[field] = {"type": "boolean"}
+        else:
+            properties[field] = {"type": "string"}
+
+    return schema_name, {"type": "object", "properties": properties}
+
+
 def parse_endpoints_from_text(text: str) -> list[tuple[str, str]]:
     """
     Extract (METHOD, /path) pairs from free-text blocks such as:
@@ -461,6 +554,18 @@ def build_operation(
         if code not in responses:
             responses[code] = {"description": desc}
 
+    # ── Query parameters from required_changes ────────────────────────────────
+    query_params = parse_query_params(required_changes)
+
+    # ── Response envelope (e.g. pagination wrapper) ───────────────────────────
+    envelope = parse_response_envelope(required_changes, res)
+    if envelope:
+        env_name, env_schema = envelope
+        schemas[env_name] = env_schema
+        responses[success_code]["content"]["application/json"]["schema"] = {
+            "$ref": f"#/components/schemas/{env_name}"
+        }
+
     operation: dict = {
         "summary":     summary,
         "description": op_desc or summary,
@@ -468,6 +573,9 @@ def build_operation(
         "tags":        [res],
         "responses":   responses,
     }
+
+    if query_params:
+        operation["parameters"] = query_params
 
     if method in BODY_METHODS and properties:
         req_schema_name = f"{res}{method.title()}Request"
