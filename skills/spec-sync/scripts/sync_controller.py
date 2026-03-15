@@ -42,12 +42,13 @@ except ImportError:
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
-DEFAULT_SPEC_URL = (
+_FALLBACK_SPEC_URL = (
     "https://raw.githubusercontent.com/EdytaLys/api-spec-task-manager"
     "/main/specs/task-manager-openapi.yaml"
 )
-DEFAULT_SRC_DIR = "src/main/java"
-GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
+DEFAULT_SPEC_URL = os.environ.get("SPEC_REPO_URL", _FALLBACK_SPEC_URL)
+DEFAULT_SRC_DIR  = os.environ.get("SPEC_SYNC_SRC_DIR", "src/main/java")
+GITHUB_TOKEN     = os.environ.get("GITHUB_TOKEN", "")
 
 HTTP_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
 

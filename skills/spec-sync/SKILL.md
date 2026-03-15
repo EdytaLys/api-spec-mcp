@@ -23,7 +23,15 @@ Synchronises a Spring Boot REST controller with the latest OpenAPI specification
 ## Prerequisites
 
 ```bash
-export GITHUB_TOKEN=<token>   # needed if spec is in a private repo
+# Point to your spec repo — set once, picked up automatically on every run
+export SPEC_REPO_URL=https://raw.githubusercontent.com/your-org/your-spec-repo/main/specs/openapi.yaml
+
+# Required only if the spec repo is private
+export GITHUB_TOKEN=<token>
+
+# Optional: override the default Java source scan path (default: src/main/java)
+export SPEC_SYNC_SRC_DIR=backend/src/main/java
+
 pip install requests pyyaml   # already in /tmp/jira_venv
 ```
 
