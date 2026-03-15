@@ -3,14 +3,15 @@
 publish_spec.py
 ===============
 Checks that a JIRA story has an approved subtask (status=Done + label
-api-spec-approved), then re-generates the endpoint OpenAPI spec, merges it
-into specs/swagger.yaml in GitHub, bumps the version, and opens a Pull Request.
+api-spec-approved), extracts the OpenAPI YAML embedded in that subtask,
+merges it into the existing spec in a GitHub repo, bumps the version, and
+opens a Pull Request.
 
 Usage:
     python publish_spec.py SCRUM-42
     python publish_spec.py SCRUM-42 --dry-run
-    python publish_spec.py SCRUM-42 --repo EdytaLys/api-spec-task-manager
-    python publish_spec.py SCRUM-42 --spec-path specs/swagger.yaml
+    python publish_spec.py SCRUM-42 --repo owner/repo
+    python publish_spec.py SCRUM-42 --spec-path specs/openapi.yaml
     python publish_spec.py SCRUM-42 --base-branch develop
 
 Requirements: pip install requests pyyaml
@@ -38,18 +39,10 @@ _gs = _ilu.module_from_spec(_gs_spec)
 _gs_spec.loader.exec_module(_gs)
 
 # Re-export helpers we need
-CONFIG                    = _gs.CONFIG
-fetch_issue               = _gs.fetch_issue
-load_field_ids            = _gs.load_field_ids
-extract_value             = _gs.extract_value
-extract_fields_from_description = _gs.extract_fields_from_description
-build_spec                = _gs.build_spec
-compare_operations        = _gs.compare_operations
-merge_spec                = _gs.merge_spec
-fetch_existing_spec       = _gs.fetch_existing_spec
-parse_endpoints_from_text = _gs.parse_endpoints_from_text
-parse_path                = _gs.parse_path
-github_blob_to_raw        = _gs.github_blob_to_raw
+CONFIG             = _gs.CONFIG
+fetch_issue        = _gs.fetch_issue
+compare_operations = _gs.compare_operations
+merge_spec         = _gs.merge_spec
 
 try:
     import yaml
@@ -114,60 +107,60 @@ def find_approved_subtask(parent_key: str) -> dict | None:
     return None
 
 
-def _collect_fields(issue: dict) -> tuple[dict[str, str], str]:
+# ─── Spec extraction from subtask description ────────────────────────────────
+
+def _adf_texts(node: dict) -> list[str]:
+    """Recursively collect all text leaf values from an ADF node."""
+    if node.get("type") == "text":
+        return [node.get("text", "")]
+    return [t for child in node.get("content", []) for t in _adf_texts(child)]
+
+
+def extract_spec_from_subtask(subtask: dict) -> dict | None:
     """
-    Extract JIRA custom fields (and description fallback) from a full issue dict.
-    Returns (fields_raw, summary).
+    Find the OpenAPI YAML code block embedded in the subtask description
+    (written by generate_spec.py under the 'Generated OpenAPI spec' heading).
+
+    Walks the ADF document, finds the first codeBlock node whose language
+    is 'yaml' (or whose content parses as a valid OpenAPI dict), and returns
+    the parsed spec dict.
+
+    Returns None if no valid spec is found.
     """
-    field_ids = load_field_ids()
-    raw = issue.get("fields", {})
-    summary = raw.get("summary", "")
+    desc_adf = subtask.get("fields", {}).get("description")
+    if not desc_adf:
+        return None
 
-    fields_raw: dict[str, str] = {}
-    for name, fid in field_ids.items():
-        val = extract_value(raw.get(fid))
-        if val:
-            fields_raw[name] = val
+    def _find_code_blocks(node: dict) -> list[str]:
+        """Return text content of every codeBlock node in the ADF tree."""
+        results = []
+        if node.get("type") == "codeBlock":
+            results.append("".join(_adf_texts(node)))
+        for child in node.get("content", []):
+            results.extend(_find_code_blocks(child))
+        return results
 
-    # Fall back to description sections for missing fields
-    desc_adf = raw.get("description")
-    if desc_adf:
-        from_desc = extract_fields_from_description(desc_adf)
-        for k, v in from_desc.items():
-            if k not in fields_raw:
-                fields_raw[k] = v
+    for block_text in _find_code_blocks(desc_adf):
+        block_text = block_text.strip()
+        if not block_text:
+            continue
+        # Try YAML first, then JSON
+        parsed = None
+        if yaml is not None:
+            try:
+                parsed = yaml.safe_load(block_text)
+            except Exception:
+                pass
+        if not isinstance(parsed, dict):
+            try:
+                parsed = json.loads(block_text)
+            except Exception:
+                pass
+        # Validate it looks like an OpenAPI doc
+        if isinstance(parsed, dict) and "openapi" in parsed and "paths" in parsed:
+            return parsed
 
-    return fields_raw, summary
-
-
-def _detect_endpoints(issue: dict, fields_raw: dict[str, str], summary: str) -> list[tuple[str, str]]:
-    """
-    Detect (METHOD, /path) pairs from the JIRA story — only from the
-    'New endpoints to create' section and the summary line.
-    """
-    raw = issue.get("fields", {})
-    desc_adf = raw.get("description")
-
-    endpoints: list[tuple[str, str]] = []
-
-    # From description "new endpoints to create" section
-    if desc_adf:
-        sec = _gs.normalise_sections(_gs.parse_description_sections(desc_adf))
-        for line in sec.get("endpoints", []):
-            endpoints.extend(parse_endpoints_from_text(line))
-
-    # From summary line
-    endpoints.extend(parse_endpoints_from_text(summary))
-
-    # Deduplicate preserving order
-    seen = set()
-    unique = []
-    for ep in endpoints:
-        if ep not in seen:
-            seen.add(ep)
-            unique.append(ep)
-
-    return unique
+    return None
 
 
 # ─── Version bumping ──────────────────────────────────────────────────────────
@@ -448,25 +441,32 @@ def main() -> None:
     approved_key = approved["key"]
     print(f"✓ Found approved subtask: {approved_key}", file=sys.stderr)
 
-    # ── 2. Re-generate spec from parent story ─────────────────────────────────
-    print(f"  Re-generating spec from {key}…", file=sys.stderr)
+    # ── 2. Extract OpenAPI spec from approved subtask ─────────────────────────
+    print(f"  Extracting spec from subtask {approved_key}…", file=sys.stderr)
+    new_spec = extract_spec_from_subtask(approved)
+
+    if new_spec is None:
+        sys.exit(
+            f"⛔  Could not find an OpenAPI YAML code block in {approved_key}.\n"
+            "    Make sure the subtask was generated by the jira-to-openapi skill\n"
+            "    (it should contain a 'Generated OpenAPI spec' section)."
+        )
+
+    print(f"✓ Spec extracted from {approved_key}", file=sys.stderr)
+
+    # Derive summary from parent story for PR title / commit message
     parent_issue = fetch_issue(key)
-    fields_raw, summary = _collect_fields(parent_issue)
-    endpoints = _detect_endpoints(parent_issue, fields_raw, summary)
+    summary = parent_issue.get("fields", {}).get("summary", key)
 
+    # Collect endpoints from the extracted spec paths (source of truth)
+    endpoints = [
+        (method.upper(), path)
+        for path, methods in new_spec.get("paths", {}).items()
+        for method in methods
+        if method.upper() in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS")
+    ]
     if not endpoints:
-        # Fall back: single endpoint from HTTP method field + parse_path
-        method = (fields_raw.get("API HTTP Method") or "POST").upper()
-        path   = parse_path(summary)
-        endpoints = [(method, path)]
-
-    # Build new spec for the first detected endpoint
-    method, path = endpoints[0]
-    new_spec = build_spec(
-        key, fields_raw, summary,
-        override_path=path,
-        override_method=method,
-    )
+        sys.exit(f"⛔  Extracted spec from {approved_key} has no paths.")
 
     # ── 3. Fetch existing spec from GitHub ────────────────────────────────────
     print(f"  Fetching existing spec: {args.spec_path} @ {args.base_branch}", file=sys.stderr)
@@ -525,6 +525,7 @@ def main() -> None:
         return
 
     # ── 7. Create branch + commit ─────────────────────────────────────────────
+    _, path = endpoints[0]
     branch = _branch_name(key, path)
     print(f"  Creating branch: {branch}", file=sys.stderr)
     base_sha = gh_get_ref_sha(args.repo, args.base_branch)
