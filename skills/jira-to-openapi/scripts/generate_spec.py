@@ -1021,14 +1021,13 @@ def create_subtask_in_jira(
     all_breaking = [m for d in diffs for m in d["breaking"]]
     endpoints    = ", ".join(f"{d['method']} {d['path']}" for d in diffs)
 
-    if all_breaking:
-        prefix  = "⚠️ Breaking changes"
+    if not diffs:
+        summary = f"OpenAPI spec review: {parent_key} — generated spec"
+    elif all_breaking:
         summary = f"OpenAPI spec review: {endpoints} — breaking changes detected"
     elif any(d["additive"] for d in diffs):
-        prefix  = "✅ Additive changes"
         summary = f"OpenAPI spec review: {endpoints} — additive changes, update spec"
     else:
-        prefix  = "✔ No changes"
         summary = f"OpenAPI spec review: {endpoints} — no schema changes"
 
     body = {
@@ -1093,8 +1092,10 @@ def main() -> None:
     )
     parser.add_argument("--report-only", action="store_true",
         help="Print the change report only; do not write the spec file.")
-    parser.add_argument("--create-subtask", action="store_true",
-        help="Create a Subtask under the JIRA issue containing the change report and generated spec.")
+    parser.add_argument("--create-subtask", action="store_true", default=True,
+        help="Create a Subtask under the JIRA issue with the change report and generated spec (default: on).")
+    parser.add_argument("--no-subtask", dest="create_subtask", action="store_false",
+        help="Skip subtask creation.")
     parser.add_argument("--project", default="SCRUM",
         help="JIRA project key used when creating the subtask (default: SCRUM).")
     args = parser.parse_args()
