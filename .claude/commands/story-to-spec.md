@@ -120,15 +120,21 @@ Use the `addCommentToJiraIssue` MCP tool to post a comment on the JIRA story. **
 ## Auto-generated OpenAPI Specification
 
 ### Change Summary
-- **Type**: [New endpoint / Update to existing endpoint]
-- **Endpoint**: [METHOD /path]
-- **Breaking change**: [Yes / No]
-- **Recommended version**: [X.Y.Z] (from [current version])
-- **Reason**: [brief description of what changed and why]
+
+| Property | Value |
+|---|---|
+| Type | [New endpoint / Update to existing endpoint] |
+| Endpoint | [METHOD /path] |
+| Breaking change | [Yes / No] |
+| Recommended version | [X.Y.Z] (from [current version]) |
+| Reason | [brief description of what changed and why] |
 
 ### Breaking Change Analysis
-[For each change, list whether it is breaking or additive with explanation]
-- [description of change] — **breaking** / **additive**
+
+| Change | Classification | Explanation |
+|---|---|---|
+| [description of change] | Breaking / Additive | [why it is breaking or additive] |
+| ... | ... | ... |
 
 ### Generated OpenAPI Specification
 
@@ -137,7 +143,11 @@ Use the `addCommentToJiraIssue` MCP tool to post a comment on the JIRA story. **
 ```
 
 ### Validation Rules Applied
-[List each validation rule from the story and how it was mapped to the spec]
+
+| Story Rule | Spec Mapping | HTTP Error |
+|---|---|---|
+| [validation rule from story] | [how it maps to schema constraint or description] | [error code if applicable] |
+| ... | ... | ... |
 
 ### Next Steps
 - Review the generated specification
