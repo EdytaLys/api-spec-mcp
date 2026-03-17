@@ -39,10 +39,17 @@ _gs = _ilu.module_from_spec(_gs_spec)
 _gs_spec.loader.exec_module(_gs)
 
 # Re-export helpers we need
-CONFIG             = _gs.CONFIG
-fetch_issue        = _gs.fetch_issue
-compare_operations = _gs.compare_operations
-merge_spec         = _gs.merge_spec
+CONFIG                    = _gs.CONFIG
+fetch_issue               = _gs.fetch_issue
+extract_value             = _gs.extract_value
+extract_fields_from_description = _gs.extract_fields_from_description
+build_spec                = _gs.build_spec
+compare_operations        = _gs.compare_operations
+merge_spec                = _gs.merge_spec
+fetch_existing_spec       = _gs.fetch_existing_spec
+parse_endpoints_from_text = _gs.parse_endpoints_from_text
+parse_path                = _gs.parse_path
+github_blob_to_raw        = _gs.github_blob_to_raw
 
 try:
     import yaml
