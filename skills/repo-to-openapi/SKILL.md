@@ -142,7 +142,11 @@ Rules:
 
 ## Output
 
-Save as `openapi.yaml` in the repo root (or user-specified location). Print a brief summary:
+Save as `openapi.yaml` in the repo root (or user-specified location), then validate it:
+```bash
+python3 scripts/validate_openapi.py openapi.yaml
+```
+Fix any errors before finishing. Then print a brief summary:
 ```
 Generated openapi.yaml
   Endpoints : N
