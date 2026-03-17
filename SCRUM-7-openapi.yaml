@@ -1,0 +1,248 @@
+openapi: 3.0.3
+info:
+  title: Task Manager With Copilot API
+  description: A full-stack task management application built with Spring Boot and
+    React, featuring a Kanban board with drag-and-drop functionality, real-time validation,
+    and comprehensive CRUD operations.
+  version: 1.1.0
+  x-source-repo: /Users/edyta.lysiak/Desktop/Projects/Playground/GitHub/task_manager_with_copilot
+  x-scanned-at: '2026-03-15T18:08:55Z'
+  x-jira-issue: SCRUM-7
+servers:
+- url: https://task-manager-with-copilot-server-535572860478.europe-west1.run.app
+  description: Production
+- url: http://localhost:8080
+  description: Local development
+paths:
+  /api/tasks:
+    get:
+      operationId: getAllTasks
+      tags:
+      - Tasks
+      summary: GET /api/tasks
+      responses:
+        '200':
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+        '404':
+          description: Resource not found
+        '500':
+          description: Internal server error
+    post:
+      operationId: createTask
+      tags:
+      - Tasks
+      summary: POST /api/tasks
+      responses:
+        '201':
+          description: Created
+        '400':
+          description: Bad request — validation error
+        '409':
+          description: Conflict — resource already exists
+        '401':
+          description: Unauthorized
+        '500':
+          description: Internal server error
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateDTO'
+  /api/tasks/{id}:
+    get:
+      operationId: getTaskById
+      tags:
+      - Tasks
+      summary: GET /api/tasks/{id}
+      responses:
+        '200':
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+        '404':
+          description: Resource not found
+        '500':
+          description: Internal server error
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    put:
+      operationId: updateTask
+      tags:
+      - Tasks
+      summary: PUT /api/tasks/{id}
+      responses:
+        '200':
+          description: Successful response
+        '400':
+          description: Bad request — validation error
+        '409':
+          description: Conflict — resource already exists
+        '401':
+          description: Unauthorized
+        '404':
+          description: Resource not found
+        '500':
+          description: Internal server error
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskUpdateDTO'
+    delete:
+      operationId: deleteTask
+      tags:
+      - Tasks
+      summary: DELETE /api/tasks/{id}
+      responses:
+        '200':
+          description: Successful response
+        '400':
+          description: Bad request
+        '401':
+          description: Unauthorized
+        '404':
+          description: Resource not found
+        '500':
+          description: Internal server error
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    patch:
+      summary: Add PATCH /api/tasks/{id} for partial task updates
+      description: 'The existing PUT /api/tasks/{id} requires all task fields. Drag-and-drop
+        status updates on the Kanban board should only need to send { "status": "IN_PROGRESS"
+        } rather than the full payload.
+
+        As a frontend developer, I want a PATCH endpoint so that I can update only
+        the changed fields of a task without fetching and resending the full object.
+
+
+        **Acceptance criteria:**
+
+        PATCH /api/tasks/{id} with { "status": "DONE" } updates only status, other
+        fields unchanged
+
+        PATCH with empty body {} returns 200 with unchanged task
+
+        PATCH with title that already exists returns 409 Conflict
+
+        updatedAt is refreshed on every successful PATCH
+
+        Auto-generated OpenAPI spec lists PATCH separately from PUT with correct schema'
+      operationId: patchApiTasks
+      tags:
+      - Task
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          description: Bad request — validation error
+        '401':
+          description: Unauthorized
+        '500':
+          description: Internal server error
+components:
+  schemas:
+    TaskCreateDTO:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+        dueDate:
+          type: string
+          format: date-time
+      required:
+      - title
+      - status
+    TaskUpdateDTO:
+      type: object
+      properties:
+        title:
+          type: string
+        description:
+          type: string
+        status:
+          type: string
+        dueDate:
+          type: string
+          format: date-time
+      required:
+      - title
+      - status
+    SuccessResponse:
+      type: object
+      properties:
+        data:
+          description: Response payload
+        timestamp:
+          type: string
+          format: date-time
+    ErrorResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+    ValidationErrorResponse:
+      type: object
+      properties:
+        errors:
+          type: object
+          additionalProperties:
+            type: string
+        timestamp:
+          type: string
+          format: date-time
+    TaskResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique resource identifier
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+security:
+- BearerAuth: []
+tags:
+- name: Tasks
+  description: Operations on Tasks resources
+- name: Task
+  description: Operations on Task resources

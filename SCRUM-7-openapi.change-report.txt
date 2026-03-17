@@ -1,0 +1,20 @@
+========================================================================
+  OpenAPI Change Report — SCRUM-7
+  Add PATCH /api/tasks/{id} for partial task updates
+========================================================================
+
+  ┌─ PATCH /api/tasks/{id}
+  │  ✅ NEW endpoint — this is an additive change.
+  │     No existing callers will be affected.
+  └────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+  OVERALL VERDICT
+────────────────────────────────────────────────────────────────────────
+  ✅ All changes are ADDITIVE (backward compatible).
+     A minor version bump (x.y.0) is sufficient.
+
+────────────────────────────────────────────────────────────────────────
+  WHAT CHANGED (summary)
+────────────────────────────────────────────────────────────────────────
+  • PATCH /api/tasks/{id} — new endpoint added

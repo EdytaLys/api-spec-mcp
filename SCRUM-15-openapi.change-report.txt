@@ -1,0 +1,22 @@
+========================================================================
+  OpenAPI Change Report — SCRUM-15
+  Update GET /api/tasks
+========================================================================
+
+  ┌─ GET /api/tasks
+  │  ⚠️  BREAKING CHANGES DETECTED:
+  │     ✗ HTTP 404 response ('Resource not found') removed — clients handling it will be affected.
+  │  📝 Summary changed: 'GET /api/tasks' → 'Update GET /api/tasks'
+  └────────────────────────────────────────────────────────────
+
+────────────────────────────────────────────────────────────────────────
+  OVERALL VERDICT
+────────────────────────────────────────────────────────────────────────
+  ⚠️  This change contains BREAKING CHANGES.
+     A major version bump (x.0.0) is recommended.
+     Coordinate with all API consumers before releasing.
+
+────────────────────────────────────────────────────────────────────────
+  WHAT CHANGED (summary)
+────────────────────────────────────────────────────────────────────────
+  • GET /api/tasks — removed responses: 404

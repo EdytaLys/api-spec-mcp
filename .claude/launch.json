@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "JIRA MCP Server (Start)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["src/index.js"],
+      "port": null
+    },
+    {
+      "name": "JIRA MCP Server (Dev/Watch)",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["--watch", "src/index.js"],
+      "port": null
+    }
+  ]
+}

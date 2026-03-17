@@ -1,0 +1,75 @@
+openapi: 3.0.3
+info:
+  title: Add PATCH /api/tasks/{id} for partial task updates
+  description: 'The existing PUT /api/tasks/{id} requires all task fields. Drag-and-drop
+    status updates on the Kanban board should only need to send { "status": "IN_PROGRESS"
+    } rather than the full payload.
+
+    As a frontend developer, I want a PATCH endpoint so that I can update only the
+    changed fields of a task without fetching and resending the full object.'
+  version: 1.0.0
+  x-jira-issue: SCRUM-7
+servers:
+- url: https://api.example.com/v1
+  description: Production
+- url: https://staging-api.example.com/v1
+  description: Staging
+paths:
+  /api/tasks/{id}:
+    patch:
+      summary: Add PATCH /api/tasks/{id} for partial task updates
+      description: 'The existing PUT /api/tasks/{id} requires all task fields. Drag-and-drop
+        status updates on the Kanban board should only need to send { "status": "IN_PROGRESS"
+        } rather than the full payload.
+
+        As a frontend developer, I want a PATCH endpoint so that I can update only
+        the changed fields of a task without fetching and resending the full object.
+
+
+        **Acceptance criteria:**
+
+        PATCH /api/tasks/{id} with { "status": "DONE" } updates only status, other
+        fields unchanged
+
+        PATCH with empty body {} returns 200 with unchanged task
+
+        PATCH with title that already exists returns 409 Conflict
+
+        updatedAt is refreshed on every successful PATCH
+
+        Auto-generated OpenAPI spec lists PATCH separately from PUT with correct schema'
+      operationId: patchApiTasks
+      tags:
+      - Task
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskResponse'
+        '400':
+          description: Bad request — validation error
+        '401':
+          description: Unauthorized
+        '500':
+          description: Internal server error
+components:
+  schemas:
+    TaskResponse:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: Unique resource identifier
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+security:
+- BearerAuth: []
+tags:
+- name: Task
+  description: Operations on Task resources
