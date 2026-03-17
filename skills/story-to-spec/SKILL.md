@@ -120,16 +120,20 @@ Generates a spec **for just that endpoint** with requested changes:
 
 #### 7a. Spec generated successfully
 
-Posts a comment containing:
+Posts a comment (using `contentFormat: "markdown"`) containing:
 - **Change Summary**: type, endpoint, breaking yes/no, version recommendation
 - **Breaking Change Analysis**: per-change classification with explanation
 - **Generated OpenAPI Specification**: full YAML in a code block
 - **Validation Rules Applied**: how each story rule maps to the spec
 - **Next Steps**: review, validate at swagger.io, merge
 
+**Formatting**: Comments use standard Markdown (## headings, **bold**, ``` code blocks).
+The `contentFormat: "markdown"` parameter ensures proper rendering on both Jira Cloud
+and Jira Data Center v10.3.16+.
+
 #### 7b. Insufficient information
 
-Posts a comment listing:
+Posts a comment (using `contentFormat: "markdown"`) listing:
 - Each specific missing item with guidance on what to provide
 - An example format showing how to structure the story details
 
